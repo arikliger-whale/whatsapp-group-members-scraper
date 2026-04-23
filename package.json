@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-users-scraper",
   "scripts": {
-    "minify": "uglifyjs --compress --mangle --output dist/main.min.js -- dist/main.mjs",
+    "minify": "uglifyjs --compress --mangle --output dist/main.min.js -- dist/main.mjs && printf '\\n' >> dist/main.min.js",
     "build-vite": "tsc && vite build",
     "build": "yarn build-vite && yarn minify && build-readme README.md"
   },

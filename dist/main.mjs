@@ -903,113 +903,95 @@ function buildCTABtns() {
 let modalObserver;
 function listenModalChanges() {
   const groupNameNode = document.querySelectorAll("header span[style*='height']:not(.copyable-text)");
-  let source;
+  let source = null;
   if (groupNameNode.length == 1) {
     source = groupNameNode[0].textContent;
   }
-  const modalElems = document.querySelectorAll('[data-animate-modal-body="true"]');
-  const modalElem = modalElems[0];
-  const targetNode = modalElem.querySelectorAll("div[style*='height']")[1];
-  const config = { attributes: true, childList: true, subtree: true };
+  const modalElem = document.querySelector('[data-animate-modal-body="true"]');
+  if (!modalElem)
+    return;
+  const scrapedIds = /* @__PURE__ */ new Set();
+  const extractFromListItem = async (listItem) => {
+    if (!listItem.querySelector('[data-testid="cell-frame-container"]'))
+      return;
+    const titleSpan = listItem.querySelector('[data-testid="cell-frame-title"] span[title]');
+    if (!titleSpan)
+      return;
+    const titleText = (titleSpan.getAttribute("title") || "").trim();
+    if (!titleText)
+      return;
+    let profileName = "";
+    let profilePhone = "";
+    if (titleText.startsWith("~")) {
+      profileName = cleanName(titleText);
+      const phoneSpan = listItem.querySelector('[role="gridcell"][aria-colindex="1"] span[dir="auto"]');
+      if (phoneSpan && phoneSpan.textContent) {
+        profilePhone = phoneSpan.textContent.trim();
+      }
+    } else {
+      profilePhone = titleText;
+    }
+    if (!profileName && !profilePhone)
+      return;
+    const identifier = profilePhone || profileName;
+    if (scrapedIds.has(identifier))
+      return;
+    scrapedIds.add(identifier);
+    let profileDescription = "";
+    const descSpan = listItem.querySelector('[data-testid="cell-frame-secondary"] [data-testid="selectable-text"]');
+    if (descSpan && descSpan.textContent) {
+      const desc = cleanDescription(descSpan.textContent);
+      if (desc)
+        profileDescription = desc;
+    }
+    const data = {
+      profileId: identifier,
+      phoneNumber: profilePhone || profileName
+    };
+    if (source)
+      data.source = source;
+    if (profileName)
+      data.name = profileName;
+    if (profileDescription)
+      data.description = profileDescription;
+    await memberListStore.addElem(identifier, data, true);
+    logsTracker.addHistoryLog({
+      label: `Scraping ${profileName || profilePhone}`,
+      category: LogCategory.LOG
+    });
+    updateConter();
+  };
+  const handleNode = (el) => {
+    let items = [];
+    if (el.getAttribute && el.getAttribute("role") === "listitem") {
+      items = [el];
+    } else if (el.querySelectorAll) {
+      items = Array.from(el.querySelectorAll('[role="listitem"]'));
+    }
+    items.forEach((listItem) => {
+      const titleSpan = listItem.querySelector('[data-testid="cell-frame-title"] span[title]');
+      const titleText = titleSpan ? (titleSpan.getAttribute("title") || "").trim() : "";
+      if (!titleText)
+        return;
+      if (listItem.getAttribute("data-scraped") === titleText)
+        return;
+      listItem.setAttribute("data-scraped", titleText);
+      window.setTimeout(() => extractFromListItem(listItem), 10);
+    });
+  };
   const callback = (mutationList) => {
     for (const mutation of mutationList) {
-      if (mutation.type === "childList") {
-        if (mutation.addedNodes.length > 0) {
-          const node = mutation.addedNodes[0];
-          const text = node.textContent;
-          if (text) {
-            const textClean = text.trim();
-            if (textClean.length > 0) {
-              if (!textClean.match(/Loading About/i) && !textClean.match(/I am using WhatsApp/i) && !textClean.match(/Available/i))
-                ;
-            }
-          }
-        }
-      } else if (mutation.type === "attributes") {
-        const target = mutation.target;
-        const tagName = target.tagName;
-        if (["div"].indexOf(tagName.toLowerCase()) === -1 || target.getAttribute("role") !== "listitem") {
-          continue;
-        }
-        const listItem = target;
-        window.setTimeout(async () => {
-          let profileName = "";
-          let profileDescription = "";
-          let profilePhone = "";
-          const titleElems = listItem.querySelectorAll("span[title]:not(.copyable-text)");
-          if (titleElems.length > 0) {
-            const text = titleElems[0].textContent;
-            if (text) {
-              const name = cleanName(text);
-              if (name && name.length > 0) {
-                profileName = name;
-              }
-            }
-          }
-          if (profileName.length === 0) {
-            return;
-          }
-          const descriptionElems = listItem.querySelectorAll("span[title].copyable-text");
-          if (descriptionElems.length > 0) {
-            const text = descriptionElems[0].textContent;
-            if (text) {
-              const description = cleanDescription(text);
-              if (description && description.length > 0) {
-                profileDescription = description;
-              }
-            }
-          }
-          const phoneElems = listItem.querySelectorAll("span[style*='height']:not([title])");
-          if (phoneElems.length > 0) {
-            const text = phoneElems[0].textContent;
-            if (text) {
-              const textClean = text.trim();
-              if (textClean && textClean.length > 0) {
-                profilePhone = textClean;
-              }
-            }
-          }
-          if (profileName) {
-            const identifier = profilePhone ? profilePhone : profileName;
-            console.log(identifier);
-            const data = {};
-            if (source) {
-              data.source = source;
-            }
-            if (profileDescription) {
-              data.description = profileDescription;
-            }
-            if (profilePhone) {
-              data.phoneNumber = profilePhone;
-              if (profileName) {
-                data.name = profileName;
-              }
-            } else {
-              if (profileName) {
-                data.phoneNumber = profileName;
-              }
-            }
-            await memberListStore.addElem(
-              identifier,
-              {
-                profileId: identifier,
-                ...data
-              },
-              true
-              // Update
-            );
-            logsTracker.addHistoryLog({
-              label: `Scraping ${profileName}`,
-              category: LogCategory.LOG
-            });
-            updateConter();
-          }
-        }, 10);
+      if (mutation.type === "childList" && mutation.addedNodes.length > 0) {
+        mutation.addedNodes.forEach((node) => {
+          if (node.nodeType === 1)
+            handleNode(node);
+        });
       }
     }
   };
+  handleNode(modalElem);
   modalObserver = new MutationObserver(callback);
-  modalObserver.observe(targetNode, config);
+  modalObserver.observe(modalElem, { childList: true, subtree: true });
 }
 function stopListeningModalChanges() {
   if (modalObserver) {
