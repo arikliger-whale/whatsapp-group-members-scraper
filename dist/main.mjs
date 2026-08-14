@@ -1,35 +1,3 @@
-function exportToCsv(filename, rows) {
-  var processRow = function(row) {
-    var finalVal = "";
-    for (var j = 0; j < row.length; j++) {
-      var innerValue = row[j] === null || typeof row[j] === "undefined" ? "" : row[j].toString();
-      if (row[j] instanceof Date) {
-        innerValue = row[j].toLocaleString();
-      }
-      var result = innerValue.replace(/"/g, '""');
-      if (result.search(/("|,|\n)/g) >= 0)
-        result = '"' + result + '"';
-      if (j > 0)
-        finalVal += ",";
-      finalVal += result;
-    }
-    return finalVal + "\n";
-  };
-  var csvFile = "";
-  for (var i = 0; i < rows.length; i++) {
-    csvFile += processRow(rows[i]);
-  }
-  var blob = new Blob([csvFile], { type: "text/csv;charset=utf-8;" });
-  var link = document.createElement("a");
-  if (link.download !== void 0) {
-    var url = URL.createObjectURL(blob);
-    link.setAttribute("href", url);
-    link.setAttribute("download", filename);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  }
-}
 const instanceOfAny = (object, constructors) => constructors.some((c) => object instanceof c);
 let idbProxyableTypes;
 let cursorAdvanceMethods;
@@ -814,16 +782,219 @@ class HistoryTracker {
     this.renderLogs();
   }
 }
+const BIDI_AND_SPACE = /[\s\-\(\)\.\u00a0\u202f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+const BIDI_MARKS = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+function stripBidi(text) {
+  return text.replace(BIDI_MARKS, "");
+}
+function isPhoneNumber(text) {
+  const stripped = text.replace(BIDI_AND_SPACE, "");
+  return /^\+?\d{6,15}$/.test(stripped);
+}
 function cleanName(name) {
-  const nameClean = name.trim();
-  return nameClean.replace("~ ", "");
+  return name.trim().replace(/^~\s*/u, "").replace(BIDI_MARKS, "").trim();
+}
+function looksLikeName(text) {
+  const t = stripBidi(text).trim();
+  if (!t)
+    return false;
+  if (t.startsWith("~"))
+    return true;
+  return /[\p{L}]/u.test(t);
 }
 function cleanDescription(description) {
-  const descriptionClean = description.trim();
-  if (!descriptionClean.match(/Loading About/i) && !descriptionClean.match(/I am using WhatsApp/i) && !descriptionClean.match(/Available/i)) {
-    return descriptionClean;
+  const descriptionClean = stripBidi(description).trim();
+  if (!descriptionClean)
+    return null;
+  const latinPlaceholders = [
+    /^loading(\s+about)?(\.{0,3})?$/i,
+    /^(hey there!?\s*)?i am using whatsapp\.?$/i,
+    /^available$/i,
+    /^cargando(\s+\w+)?(\.{0,3})?$/i,
+    /^(¡?hola!?\s*)?estoy usando whatsapp\.?$/i,
+    /^disponible$/i,
+    /^carregando(\s+\w+)?(\.{0,3})?$/i,
+    /^(oi,?\s*(eu\s+)?)?estou usando o?\s*whatsapp\.?$/i,
+    /^disponível$/i,
+    /^chargement(\b.*)?(\.{0,3})?$/i,
+    /^(salut\s*!?\s*)?j['’]utilise whatsapp\.?$/i,
+    /^disponible$/i,
+    /^wird geladen(\.{0,3})?$/i,
+    /^(hallo!?\s*)?ich benutze whatsapp\.?$/i,
+    /^verfügbar$/i,
+    /^caricamento(\.{0,3})?$/i,
+    /^(ciao!?\s*)?sto usando whatsapp\.?$/i,
+    /^disponibile$/i,
+    /^(привет!?\s*)?я использую whatsapp\.?$/i,
+    /^доступен$/i,
+    /^(merhaba!?\s*)?whatsapp kullan(ıyorum|iyorum)\.?$/i,
+    /^müsait$/i,
+    /^(halo!?\s*)?saya menggunakan whatsapp\.?$/i,
+    /^(嗨[！!]?\s*)?我正在使用 whatsapp$/
+  ];
+  for (const re of latinPlaceholders) {
+    if (re.test(descriptionClean))
+      return null;
+  }
+  const rtlPlaceholders = [
+    /^טוען(\s+.*)?$/,
+    /^(היי[!,]?\s*)?אני משתמש(ת)? ב-?WhatsApp$/,
+    /^זמינ[הן]$/,
+    /^جاري التحميل/,
+    /^(مرحبا!?\s*)?أنا أستخدم (واتساب|WhatsApp)$/,
+    /^متاح$/,
+    /^Я использую WhatsApp$/,
+    /^Доступен$/,
+    /^我正在使用 WhatsApp$/
+  ];
+  for (const re of rtlPlaceholders) {
+    if (re.test(descriptionClean))
+      return null;
+  }
+  return descriptionClean;
+}
+function rowToCsvLine(row) {
+  let line = "";
+  for (let i = 0; i < row.length; i++) {
+    const cell = row[i];
+    let value = cell === null || cell === void 0 ? "" : cell.toString();
+    if (cell instanceof Date) {
+      value = cell.toLocaleString();
+    }
+    value = value.replace(/"/g, '""');
+    if (value.search(/("|,|\n)/g) >= 0) {
+      value = '"' + value + '"';
+    }
+    if (i > 0)
+      line += ",";
+    line += value;
+  }
+  return line + "\n";
+}
+function exportToCsvWithBom(filename, rows) {
+  let csvFile = "";
+  for (let i = 0; i < rows.length; i++) {
+    csvFile += rowToCsvLine(rows[i]);
+  }
+  const blob = new Blob(["\uFEFF" + csvFile], { type: "text/csv;charset=utf-8;" });
+  const link = document.createElement("a");
+  if (link.download !== void 0) {
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+}
+function findModalElem(root = document) {
+  const animate = root.querySelector('[data-animate-modal-body="true"]');
+  if (animate)
+    return animate;
+  const dialogs = root.querySelectorAll('div[role="dialog"]');
+  for (const dialog of Array.from(dialogs)) {
+    if (dialog.querySelector('[role="listitem"]')) {
+      return dialog;
+    }
+  }
+  if (dialogs.length === 1)
+    return dialogs[0];
+  return null;
+}
+function nodeIsOrContainsModal(htmlNode) {
+  if (!htmlNode || htmlNode.nodeType !== 1)
+    return false;
+  const matches = typeof htmlNode.matches === "function" ? htmlNode.matches.bind(htmlNode) : () => false;
+  if (matches('[data-animate-modal-body="true"]'))
+    return true;
+  if (matches('div[role="dialog"]'))
+    return true;
+  if (typeof htmlNode.querySelector !== "function")
+    return false;
+  if (htmlNode.querySelector('[data-animate-modal-body="true"]'))
+    return true;
+  if (htmlNode.querySelector('div[role="dialog"]'))
+    return true;
+  return false;
+}
+function getGroupSourceName() {
+  const groupNameNode = document.querySelectorAll("header span[style*='height']:not(.copyable-text)");
+  if (groupNameNode.length === 1 && groupNameNode[0].textContent) {
+    return stripBidi(groupNameNode[0].textContent).trim() || null;
+  }
+  const dirAuto = document.querySelector('header span[dir="auto"][title]');
+  if (dirAuto) {
+    const t = dirAuto.getAttribute("title") || dirAuto.textContent;
+    if (t && t.trim())
+      return stripBidi(t).trim();
+  }
+  const titleSpan = document.querySelector("header span[title]");
+  if (titleSpan) {
+    const t = titleSpan.getAttribute("title") || titleSpan.textContent;
+    if (t && t.trim())
+      return stripBidi(t).trim();
   }
   return null;
+}
+function getListItemTitle(listItem) {
+  const titleSpan = listItem.querySelector('[data-testid="cell-frame-title"] span[title]') || listItem.querySelector("span[title]") || listItem.querySelector('span[dir="auto"]');
+  if (!titleSpan)
+    return null;
+  const text = stripBidi(titleSpan.getAttribute("title") || titleSpan.textContent || "").trim();
+  if (!text)
+    return null;
+  return { text, el: titleSpan };
+}
+function collectCandidates(listItem) {
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  const add = (s) => {
+    const v = stripBidi(s || "").trim();
+    if (!v || seen.has(v))
+      return;
+    seen.add(v);
+    out.push(v);
+  };
+  listItem.querySelectorAll("span[title]").forEach((el) => {
+    add(el.getAttribute("title"));
+    add(el.textContent);
+  });
+  listItem.querySelectorAll('span[dir="auto"]').forEach((el) => {
+    add(el.getAttribute("title"));
+    add(el.textContent);
+  });
+  listItem.querySelectorAll('[role="gridcell"]').forEach((el) => {
+    add(el.textContent);
+  });
+  return out;
+}
+function findSecondaryDescription(listItem, titleEl, name, phone) {
+  const dedicated = listItem.querySelector(
+    '[data-testid="cell-frame-secondary"] [data-testid="selectable-text"]'
+  );
+  if (dedicated && dedicated.textContent) {
+    const desc = cleanDescription(dedicated.textContent);
+    if (desc && desc !== name && desc !== phone)
+      return desc;
+  }
+  const dirAutos = Array.from(listItem.querySelectorAll('span[dir="auto"]'));
+  for (const el of dirAutos) {
+    if (titleEl && (el === titleEl || titleEl.contains(el) || el.contains(titleEl)))
+      continue;
+    if (el.closest('[data-testid="cell-frame-title"]'))
+      continue;
+    const text = stripBidi(el.getAttribute("title") || el.textContent || "").trim();
+    if (!text)
+      continue;
+    if (isPhoneNumber(text))
+      continue;
+    if (name && (text === name || cleanName(text) === name))
+      continue;
+    const desc = cleanDescription(text);
+    if (desc && desc !== name && desc !== phone)
+      return desc;
+  }
+  return "";
 }
 class WhatsAppStorage extends ListStorage {
   get headers() {
@@ -878,7 +1049,7 @@ function buildCTABtns() {
     const timestamp = (/* @__PURE__ */ new Date()).toISOString();
     const data = await memberListStore.toCsvData();
     try {
-      exportToCsv(`${exportName}-${timestamp}.csv`, data);
+      exportToCsvWithBom(`${exportName}-${timestamp}.csv`, data);
     } catch (err) {
       console.error("Error while generating export");
       console.log(err.stack);
@@ -896,40 +1067,64 @@ function buildCTABtns() {
   uiWidget.addCta(btnReinit);
   uiWidget.makeItDraggable();
   uiWidget.render();
+  const widgetAny = uiWidget;
+  if (widgetAny.inner && widgetAny.inner.setAttribute) {
+    widgetAny.inner.setAttribute("dir", "ltr");
+  }
+  if (widgetAny.canva && widgetAny.canva.setAttribute) {
+    widgetAny.canva.setAttribute("dir", "ltr");
+  }
   window.setTimeout(() => {
     updateConter();
   }, 1e3);
 }
 let modalObserver;
 function listenModalChanges() {
-  const groupNameNode = document.querySelectorAll("header span[style*='height']:not(.copyable-text)");
-  let source = null;
-  if (groupNameNode.length == 1) {
-    source = groupNameNode[0].textContent;
-  }
-  const modalElem = document.querySelector('[data-animate-modal-body="true"]');
+  const source = getGroupSourceName();
+  const modalElem = findModalElem();
   if (!modalElem)
     return;
   const scrapedIds = /* @__PURE__ */ new Set();
   const extractFromListItem = async (listItem) => {
-    if (!listItem.querySelector('[data-testid="cell-frame-container"]'))
+    const titleInfo = getListItemTitle(listItem);
+    if (!titleInfo)
       return;
-    const titleSpan = listItem.querySelector('[data-testid="cell-frame-title"] span[title]');
-    if (!titleSpan)
-      return;
-    const titleText = (titleSpan.getAttribute("title") || "").trim();
+    const titleText = titleInfo.text;
     if (!titleText)
       return;
     let profileName = "";
     let profilePhone = "";
     if (titleText.startsWith("~")) {
       profileName = cleanName(titleText);
-      const phoneSpan = listItem.querySelector('[role="gridcell"][aria-colindex="1"] span[dir="auto"]');
-      if (phoneSpan && phoneSpan.textContent) {
-        profilePhone = phoneSpan.textContent.trim();
-      }
-    } else {
+    } else if (isPhoneNumber(titleText)) {
       profilePhone = titleText;
+    } else if (looksLikeName(titleText)) {
+      profileName = cleanName(titleText);
+    }
+    const candidates = collectCandidates(listItem);
+    for (const candidate of candidates) {
+      if (isPhoneNumber(candidate)) {
+        if (!profilePhone)
+          profilePhone = candidate;
+        continue;
+      }
+      if (candidate.startsWith("~")) {
+        if (!profileName)
+          profileName = cleanName(candidate);
+        continue;
+      }
+      if (!profileName && looksLikeName(candidate) && candidate !== titleText) {
+        const maybeDesc = cleanDescription(candidate);
+        if (isPhoneNumber(titleText) && maybeDesc) {
+          profileName = cleanName(candidate);
+        }
+      }
+    }
+    if (profilePhone && !isPhoneNumber(profilePhone)) {
+      if (!profileName && looksLikeName(profilePhone)) {
+        profileName = cleanName(profilePhone);
+      }
+      profilePhone = "";
     }
     if (!profileName && !profilePhone)
       return;
@@ -937,17 +1132,17 @@ function listenModalChanges() {
     if (scrapedIds.has(identifier))
       return;
     scrapedIds.add(identifier);
-    let profileDescription = "";
-    const descSpan = listItem.querySelector('[data-testid="cell-frame-secondary"] [data-testid="selectable-text"]');
-    if (descSpan && descSpan.textContent) {
-      const desc = cleanDescription(descSpan.textContent);
-      if (desc)
-        profileDescription = desc;
-    }
+    const profileDescription = findSecondaryDescription(
+      listItem,
+      titleInfo.el,
+      profileName,
+      profilePhone
+    );
     const data = {
-      profileId: identifier,
-      phoneNumber: profilePhone || profileName
+      profileId: identifier
     };
+    if (profilePhone)
+      data.phoneNumber = profilePhone;
     if (source)
       data.source = source;
     if (profileName)
@@ -969,8 +1164,8 @@ function listenModalChanges() {
       items = Array.from(el.querySelectorAll('[role="listitem"]'));
     }
     items.forEach((listItem) => {
-      const titleSpan = listItem.querySelector('[data-testid="cell-frame-title"] span[title]');
-      const titleText = titleSpan ? (titleSpan.getAttribute("title") || "").trim() : "";
+      const titleInfo = getListItemTitle(listItem);
+      const titleText = titleInfo ? titleInfo.text : "";
       if (!titleText)
         return;
       if (listItem.getAttribute("data-scraped") === titleText)
@@ -1009,9 +1204,10 @@ function main() {
       if (mutation.type === "childList") {
         if (mutation.addedNodes.length > 0) {
           mutation.addedNodes.forEach((node) => {
+            if (node.nodeType !== 1)
+              return;
             const htmlNode = node;
-            const modalElems = htmlNode.querySelectorAll('[data-animate-modal-body="true"]');
-            if (modalElems.length > 0) {
+            if (nodeIsOrContainsModal(htmlNode)) {
               window.setTimeout(() => {
                 listenModalChanges();
                 logsTracker.addHistoryLog({
@@ -1024,9 +1220,10 @@ function main() {
         }
         if (mutation.removedNodes.length > 0) {
           mutation.removedNodes.forEach((node) => {
+            if (node.nodeType !== 1)
+              return;
             const htmlNode = node;
-            const modalElems = htmlNode.querySelectorAll('[data-animate-modal-body="true"]');
-            if (modalElems.length > 0) {
+            if (nodeIsOrContainsModal(htmlNode)) {
               stopListeningModalChanges();
               logsTracker.addHistoryLog({
                 label: "Modal Removed - Scraping Stopped",
