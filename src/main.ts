@@ -11,7 +11,7 @@ import {
  */
 
 const DB_NAME = 'model-storage';
-const DEFAULT_STATUS = 'Open a group, then Export';
+const DEFAULT_STATUS = 'Choose a group, then Export';
 const EXPORT_PREFIX = 'whatsAppExport';
 
 const BIDI_MARKS = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
@@ -42,11 +42,10 @@ interface ParticipantRef {
     name?: string;
 }
 
-interface ResolvedGroup {
+interface GroupOption {
     id: string;
     name: string;
-    usedFallback: boolean;
-    fallbackReason: string;
+    memberCount?: number;
 }
 
 type IdRecord = Record<string, unknown>;
@@ -230,21 +229,6 @@ function chatDisplayName(chat: IdRecord): string {
     return '';
 }
 
-function chatTimestamp(chat: IdRecord): number {
-    const fields = [
-        chat.t,
-        chat.timestamp,
-        chat.lastMessageRecvTimestamp,
-        chat.msgTimestamp,
-        chat.conversationTimestamp
-    ];
-    for (const f of fields) {
-        const n = Number(f);
-        if (Number.isFinite(n) && n > 0) return n;
-    }
-    return 0;
-}
-
 function titleScore(header: string, name: string): number {
     const h = normalizeText(header);
     const n = normalizeText(name);
@@ -266,76 +250,78 @@ function metaWid(meta: IdRecord): string {
     return serializeId(meta.id) || serializeId(meta._id) || serializeId(meta.groupId) || '';
 }
 
-function resolveGroup(
-    chats: IdRecord[],
-    metas: IdRecord[],
-    headerTitle: string | null
-): ResolvedGroup | null {
-    const groups = chats.filter(isGroupChat);
+function cheapMemberCount(chat: IdRecord | undefined, meta: IdRecord | undefined): number | undefined {
+    const fromRec = (rec: IdRecord | undefined): number | undefined => {
+        if (!rec) return undefined;
+        if (typeof rec.size === 'number' && rec.size > 0) return rec.size;
+        if (typeof rec.participantsCount === 'number' && rec.participantsCount > 0) {
+            return rec.participantsCount;
+        }
+        const n = asArray(rec.participants).length;
+        if (n > 0) return n;
+        const n2 = asArray(rec.participantsList).length;
+        if (n2 > 0) return n2;
+        return undefined;
+    };
+    return fromRec(meta) || fromRec(chat) || fromRec(asRecord(chat?.groupMetadata) || undefined);
+}
+
+function listGroups(chats: IdRecord[], metas: IdRecord[]): GroupOption[] {
     const metaById = new Map<string, IdRecord>();
     for (const meta of metas) {
         const id = metaWid(meta);
         if (id) metaById.set(id, meta);
     }
 
-    const enriched = groups.map((chat) => {
+    const seen = new Set<string>();
+    const out: GroupOption[] = [];
+    const add = (id: string, name: string, count?: number) => {
+        if (!id || seen.has(id)) return;
+        seen.add(id);
+        out.push({ id, name: name || id, memberCount: count });
+    };
+
+    for (const chat of chats) {
+        if (!isGroupChat(chat)) continue;
         const id = chatWid(chat);
         const meta = metaById.get(id);
-        const name = chatDisplayName(chat) || (meta ? metaSubject(meta) : '');
-        return { id, name, t: chatTimestamp(chat), chat };
-    }).filter((g) => g.id);
-
-    if (enriched.length === 0) {
-        // group-metadata only (no chat store / no @g.us chats)
-        const fromMeta = metas
-            .map((meta) => ({
-                id: metaWid(meta),
-                name: metaSubject(meta),
-                t: Number(meta.t || meta.creation || 0) || 0
-            }))
-            .filter((g) => g.id.endsWith('@g.us') || g.id);
-        if (fromMeta.length === 0) return null;
-        return pickBest(fromMeta, headerTitle);
+        add(id, chatDisplayName(chat) || (meta ? metaSubject(meta) : ''), cheapMemberCount(chat, meta));
     }
 
-    return pickBest(enriched, headerTitle);
+    for (const meta of metas) {
+        const id = metaWid(meta);
+        if (!id) continue;
+        if (!id.endsWith('@g.us')) continue;
+        add(id, metaSubject(meta), cheapMemberCount(undefined, meta));
+    }
+
+    out.sort((a, b) => a.name.localeCompare(b.name));
+    return out;
 }
 
-function pickBest(
-    groups: Array<{ id: string; name: string; t: number }>,
-    headerTitle: string | null
-): ResolvedGroup | null {
-    if (groups.length === 0) return null;
-
-    if (headerTitle) {
-        let best: { id: string; name: string; t: number; score: number } | null = null;
-        for (const g of groups) {
-            const score = titleScore(headerTitle, g.name);
-            if (score <= 0) continue;
-            if (
-                !best ||
-                score > best.score ||
-                (score === best.score && g.t > best.t)
-            ) {
-                best = { ...g, score };
-            }
-        }
-        if (best) {
-            return { id: best.id, name: best.name || headerTitle, usedFallback: false, fallbackReason: '' };
-        }
+function matchGroupByTitle(groups: GroupOption[], headerTitle: string | null): GroupOption | null {
+    if (!headerTitle) return null;
+    let best: { group: GroupOption; score: number } | null = null;
+    for (const g of groups) {
+        const score = titleScore(headerTitle, g.name);
+        if (score <= 0) continue;
+        if (!best || score > best.score) best = { group: g, score };
     }
+    return best ? best.group : null;
+}
 
-    const withTs = groups.filter((g) => g.t > 0).sort((a, b) => b.t - a.t);
-    const chosen = withTs[0] || groups[0];
-    const reason = headerTitle
-        ? 'no header match; used most recently active group'
-        : (withTs[0] ? 'used most recently active group' : 'used first group chat');
-    return {
-        id: chosen.id,
-        name: chosen.name || chosen.id,
-        usedFallback: true,
-        fallbackReason: reason
-    };
+function groupMatchesFilter(name: string, filter: string): boolean {
+    const n = normalizeText(name).toLowerCase();
+    const f = normalizeText(filter).toLowerCase();
+    if (!f) return true;
+    return n.includes(f);
+}
+
+function optionLabel(group: GroupOption): string {
+    if (group.memberCount != null && group.memberCount > 0) {
+        return `${group.name} (${group.memberCount})`;
+    }
+    return group.name;
 }
 
 function extractParticipant(value: unknown): ParticipantRef | null {
@@ -671,7 +657,35 @@ function membersToCsv(rows: MemberRow[]): Array<Array<string>> {
     return out;
 }
 
-async function exportGroupMembers(): Promise<{ group: ResolvedGroup; count: number }> {
+async function readChatsAndMetas(db: IDBDatabase): Promise<{ chats: IdRecord[]; metas: IdRecord[] }> {
+    const [chatRows, metaRows] = await Promise.all([
+        readStore(db, CHAT_STORE_CANDIDATES),
+        readStore(db, GROUP_META_STORE_CANDIDATES)
+    ]);
+    return {
+        chats: chatRows.map(asRecord).filter((r): r is IdRecord => !!r),
+        metas: metaRows.map(asRecord).filter((r): r is IdRecord => !!r)
+    };
+}
+
+async function loadGroupCatalog(): Promise<{ groups: GroupOption[]; headerTitle: string | null }> {
+    const db = await openModelStorage();
+    try {
+        const { chats, metas } = await readChatsAndMetas(db);
+        return { groups: listGroups(chats, metas), headerTitle: getVisibleGroupTitle() };
+    } finally {
+        try {
+            db.close();
+        } catch {
+            // ignore
+        }
+    }
+}
+
+async function exportGroupMembers(groupId: string): Promise<{ name: string; count: number }> {
+    if (!groupId) {
+        throw new Error(DEFAULT_STATUS);
+    }
     const db = await openModelStorage();
     try {
         const [chatRows, participantRows, contactRows, metaRows] = await Promise.all([
@@ -686,17 +700,17 @@ async function exportGroupMembers(): Promise<{ group: ResolvedGroup; count: numb
         const contacts = contactRows.map(asRecord).filter((r): r is IdRecord => !!r);
         const metas = metaRows.map(asRecord).filter((r): r is IdRecord => !!r);
 
-        const headerTitle = getVisibleGroupTitle();
-        const group = resolveGroup(chats, metas, headerTitle);
+        const groups = listGroups(chats, metas);
+        const group = groups.find((g) => idsEqual(g.id, groupId));
         if (!group) {
-            throw new Error('No group chat found in model-storage. Open a group on WhatsApp Web, then Export.');
+            throw new Error('Selected group was not found in model-storage.');
         }
 
         const participants = collectParticipants(group.id, chats, participantsStore, metas);
         const members = joinMembers(participants, contacts, group.name);
         const timestamp = new Date().toISOString();
         exportToCsvWithBom(`${EXPORT_PREFIX}-${timestamp}.csv`, membersToCsv(members));
-        return { group, count: members.length };
+        return { name: group.name, count: members.length };
     } finally {
         try {
             db.close();
@@ -709,6 +723,20 @@ async function exportGroupMembers(): Promise<{ group: ResolvedGroup; count: numb
 function setDirLtr(widget: UIContainer): void {
     widget.inner.setAttribute('dir', 'ltr');
     widget.canva.setAttribute('dir', 'ltr');
+}
+
+function fieldStyle(): string {
+    return [
+        'display: block;',
+        'width: 100%;',
+        'max-width: 420px;',
+        'box-sizing: border-box;',
+        'font-family: monospace;',
+        'font-size: 13px;',
+        'line-height: 1.35;',
+        'margin-bottom: 6px;',
+        'padding: 6px 8px;'
+    ].join('');
 }
 
 function buildWidget(): void {
@@ -731,23 +759,86 @@ function buildWidget(): void {
     statusEl.textContent = DEFAULT_STATUS;
     uiWidget.history.appendChild(statusEl);
 
+    const filterInput = document.createElement('input');
+    filterInput.type = 'search';
+    filterInput.placeholder = 'Filter groups…';
+    filterInput.setAttribute('dir', 'auto');
+    filterInput.setAttribute('style', fieldStyle());
+    uiWidget.history.appendChild(filterInput);
+
+    const selectEl = document.createElement('select');
+    selectEl.size = 8;
+    selectEl.setAttribute('dir', 'auto');
+    selectEl.setAttribute('style', fieldStyle());
+    uiWidget.history.appendChild(selectEl);
+
     const setStatus = (text: string) => {
         statusEl.textContent = text;
     };
 
-    const formatFound = (group: ResolvedGroup, count: number): string => {
-        const base = `Found ${count} members in ${group.name}`;
-        return group.usedFallback ? `${base} (${group.fallbackReason})` : base;
+    let allGroups: GroupOption[] = [];
+    let selectedId = '';
+
+    const selectedGroup = (): GroupOption | undefined => {
+        return allGroups.find((g) => g.id === selectedId);
     };
+
+    const renderOptions = () => {
+        const filter = filterInput.value;
+        const visible = allGroups.filter((g) => groupMatchesFilter(g.name, filter));
+        selectEl.innerHTML = '';
+
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = 'Choose a group';
+        selectEl.appendChild(placeholder);
+
+        for (const g of visible) {
+            const opt = document.createElement('option');
+            opt.value = g.id;
+            opt.textContent = optionLabel(g);
+            if (g.id === selectedId) opt.selected = true;
+            selectEl.appendChild(opt);
+        }
+
+        if (selectedId && !visible.some((g) => g.id === selectedId)) {
+            selectEl.value = '';
+        } else {
+            selectEl.value = selectedId;
+        }
+    };
+
+    const applySelection = (id: string) => {
+        selectedId = id;
+        renderOptions();
+    };
+
+    selectEl.addEventListener('change', () => {
+        selectedId = selectEl.value;
+        const g = selectedGroup();
+        if (g) {
+            setStatus(`Selected ${g.name}`);
+        } else {
+            setStatus(allGroups.length ? `${allGroups.length} groups found` : DEFAULT_STATUS);
+        }
+    });
+
+    filterInput.addEventListener('input', () => {
+        renderOptions();
+    });
 
     let exporting = false;
     const runExport = async () => {
         if (exporting) return;
+        if (!selectedId) {
+            setStatus(DEFAULT_STATUS);
+            return;
+        }
         exporting = true;
         setStatus('Reading IndexedDB…');
         try {
-            const { group, count } = await exportGroupMembers();
-            setStatus(formatFound(group, count));
+            const { name, count } = await exportGroupMembers(selectedId);
+            setStatus(`Found ${count} members in ${name}`);
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             setStatus(message || 'Export failed');
@@ -769,6 +860,8 @@ function buildWidget(): void {
     const btnReset = createCta();
     btnReset.appendChild(createTextSpan('Reset'));
     btnReset.addEventListener('click', () => {
+        filterInput.value = '';
+        applySelection('');
         setStatus(DEFAULT_STATUS);
     });
     uiWidget.addCta(btnReset);
@@ -777,7 +870,32 @@ function buildWidget(): void {
     uiWidget.render();
     setDirLtr(uiWidget);
 
-    void runExport();
+    const loadList = async () => {
+        setStatus('Reading IndexedDB…');
+        try {
+            const { groups, headerTitle } = await loadGroupCatalog();
+            allGroups = groups;
+            if (groups.length === 0) {
+                applySelection('');
+                setStatus('No group chats found in model-storage.');
+                return;
+            }
+            const matched = matchGroupByTitle(groups, headerTitle);
+            if (matched) {
+                applySelection(matched.id);
+                setStatus(`${groups.length} groups found. Selected open chat: ${matched.name}`);
+            } else {
+                applySelection('');
+                setStatus(`${groups.length} groups found`);
+            }
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            setStatus(message || 'Failed to list groups');
+            console.error(err);
+        }
+    };
+
+    void loadList();
 }
 
 buildWidget();

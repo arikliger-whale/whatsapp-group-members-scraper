@@ -417,7 +417,7 @@ var LogCategory;
   LogCategory2["LOG"] = "log";
 })(LogCategory || (LogCategory = {}));
 const DB_NAME = "model-storage";
-const DEFAULT_STATUS = "Open a group, then Export";
+const DEFAULT_STATUS = "Choose a group, then Export";
 const EXPORT_PREFIX = "whatsAppExport";
 const BIDI_MARKS = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 const BIDI_AND_SPACE = /[\s\-\(\)\.\u00a0\u202f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
@@ -616,21 +616,6 @@ function chatDisplayName(chat) {
   }
   return "";
 }
-function chatTimestamp(chat) {
-  const fields = [
-    chat.t,
-    chat.timestamp,
-    chat.lastMessageRecvTimestamp,
-    chat.msgTimestamp,
-    chat.conversationTimestamp
-  ];
-  for (const f of fields) {
-    const n = Number(f);
-    if (Number.isFinite(n) && n > 0)
-      return n;
-  }
-  return 0;
-}
 function titleScore(header, name) {
   const h = normalizeText(header);
   const n = normalizeText(name);
@@ -653,58 +638,83 @@ function metaSubject(meta) {
 function metaWid(meta) {
   return serializeId(meta.id) || serializeId(meta._id) || serializeId(meta.groupId) || "";
 }
-function resolveGroup(chats, metas, headerTitle) {
-  const groups = chats.filter(isGroupChat);
+function cheapMemberCount(chat, meta) {
+  const fromRec = (rec) => {
+    if (!rec)
+      return void 0;
+    if (typeof rec.size === "number" && rec.size > 0)
+      return rec.size;
+    if (typeof rec.participantsCount === "number" && rec.participantsCount > 0) {
+      return rec.participantsCount;
+    }
+    const n = asArray(rec.participants).length;
+    if (n > 0)
+      return n;
+    const n2 = asArray(rec.participantsList).length;
+    if (n2 > 0)
+      return n2;
+    return void 0;
+  };
+  return fromRec(meta) || fromRec(chat) || fromRec(asRecord(chat == null ? void 0 : chat.groupMetadata) || void 0);
+}
+function listGroups(chats, metas) {
   const metaById = /* @__PURE__ */ new Map();
   for (const meta of metas) {
     const id = metaWid(meta);
     if (id)
       metaById.set(id, meta);
   }
-  const enriched = groups.map((chat) => {
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  const add = (id, name, count) => {
+    if (!id || seen.has(id))
+      return;
+    seen.add(id);
+    out.push({ id, name: name || id, memberCount: count });
+  };
+  for (const chat of chats) {
+    if (!isGroupChat(chat))
+      continue;
     const id = chatWid(chat);
     const meta = metaById.get(id);
-    const name = chatDisplayName(chat) || (meta ? metaSubject(meta) : "");
-    return { id, name, t: chatTimestamp(chat), chat };
-  }).filter((g) => g.id);
-  if (enriched.length === 0) {
-    const fromMeta = metas.map((meta) => ({
-      id: metaWid(meta),
-      name: metaSubject(meta),
-      t: Number(meta.t || meta.creation || 0) || 0
-    })).filter((g) => g.id.endsWith("@g.us") || g.id);
-    if (fromMeta.length === 0)
-      return null;
-    return pickBest(fromMeta, headerTitle);
+    add(id, chatDisplayName(chat) || (meta ? metaSubject(meta) : ""), cheapMemberCount(chat, meta));
   }
-  return pickBest(enriched, headerTitle);
+  for (const meta of metas) {
+    const id = metaWid(meta);
+    if (!id)
+      continue;
+    if (!id.endsWith("@g.us"))
+      continue;
+    add(id, metaSubject(meta), cheapMemberCount(void 0, meta));
+  }
+  out.sort((a, b) => a.name.localeCompare(b.name));
+  return out;
 }
-function pickBest(groups, headerTitle) {
-  if (groups.length === 0)
+function matchGroupByTitle(groups, headerTitle) {
+  if (!headerTitle)
     return null;
-  if (headerTitle) {
-    let best = null;
-    for (const g of groups) {
-      const score = titleScore(headerTitle, g.name);
-      if (score <= 0)
-        continue;
-      if (!best || score > best.score || score === best.score && g.t > best.t) {
-        best = { ...g, score };
-      }
-    }
-    if (best) {
-      return { id: best.id, name: best.name || headerTitle, usedFallback: false, fallbackReason: "" };
-    }
+  let best = null;
+  for (const g of groups) {
+    const score = titleScore(headerTitle, g.name);
+    if (score <= 0)
+      continue;
+    if (!best || score > best.score)
+      best = { group: g, score };
   }
-  const withTs = groups.filter((g) => g.t > 0).sort((a, b) => b.t - a.t);
-  const chosen = withTs[0] || groups[0];
-  const reason = headerTitle ? "no header match; used most recently active group" : withTs[0] ? "used most recently active group" : "used first group chat";
-  return {
-    id: chosen.id,
-    name: chosen.name || chosen.id,
-    usedFallback: true,
-    fallbackReason: reason
-  };
+  return best ? best.group : null;
+}
+function groupMatchesFilter(name, filter) {
+  const n = normalizeText(name).toLowerCase();
+  const f = normalizeText(filter).toLowerCase();
+  if (!f)
+    return true;
+  return n.includes(f);
+}
+function optionLabel(group) {
+  if (group.memberCount != null && group.memberCount > 0) {
+    return `${group.name} (${group.memberCount})`;
+  }
+  return group.name;
 }
 function extractParticipant(value) {
   if (typeof value === "string" || typeof value === "number") {
@@ -1015,7 +1025,32 @@ function membersToCsv(rows) {
   }
   return out;
 }
-async function exportGroupMembers() {
+async function readChatsAndMetas(db) {
+  const [chatRows, metaRows] = await Promise.all([
+    readStore(db, CHAT_STORE_CANDIDATES),
+    readStore(db, GROUP_META_STORE_CANDIDATES)
+  ]);
+  return {
+    chats: chatRows.map(asRecord).filter((r) => !!r),
+    metas: metaRows.map(asRecord).filter((r) => !!r)
+  };
+}
+async function loadGroupCatalog() {
+  const db = await openModelStorage();
+  try {
+    const { chats, metas } = await readChatsAndMetas(db);
+    return { groups: listGroups(chats, metas), headerTitle: getVisibleGroupTitle() };
+  } finally {
+    try {
+      db.close();
+    } catch {
+    }
+  }
+}
+async function exportGroupMembers(groupId) {
+  if (!groupId) {
+    throw new Error(DEFAULT_STATUS);
+  }
   const db = await openModelStorage();
   try {
     const [chatRows, participantRows, contactRows, metaRows] = await Promise.all([
@@ -1028,16 +1063,16 @@ async function exportGroupMembers() {
     const participantsStore = participantRows.map(asRecord).filter((r) => !!r);
     const contacts = contactRows.map(asRecord).filter((r) => !!r);
     const metas = metaRows.map(asRecord).filter((r) => !!r);
-    const headerTitle = getVisibleGroupTitle();
-    const group = resolveGroup(chats, metas, headerTitle);
+    const groups = listGroups(chats, metas);
+    const group = groups.find((g) => idsEqual(g.id, groupId));
     if (!group) {
-      throw new Error("No group chat found in model-storage. Open a group on WhatsApp Web, then Export.");
+      throw new Error("Selected group was not found in model-storage.");
     }
     const participants = collectParticipants(group.id, chats, participantsStore, metas);
     const members = joinMembers(participants, contacts, group.name);
     const timestamp = (/* @__PURE__ */ new Date()).toISOString();
     exportToCsvWithBom(`${EXPORT_PREFIX}-${timestamp}.csv`, membersToCsv(members));
-    return { group, count: members.length };
+    return { name: group.name, count: members.length };
   } finally {
     try {
       db.close();
@@ -1048,6 +1083,19 @@ async function exportGroupMembers() {
 function setDirLtr(widget) {
   widget.inner.setAttribute("dir", "ltr");
   widget.canva.setAttribute("dir", "ltr");
+}
+function fieldStyle() {
+  return [
+    "display: block;",
+    "width: 100%;",
+    "max-width: 420px;",
+    "box-sizing: border-box;",
+    "font-family: monospace;",
+    "font-size: 13px;",
+    "line-height: 1.35;",
+    "margin-bottom: 6px;",
+    "padding: 6px 8px;"
+  ].join("");
 }
 function buildWidget() {
   const uiWidget = new UIContainer();
@@ -1068,22 +1116,76 @@ function buildWidget() {
   ].join(""));
   statusEl.textContent = DEFAULT_STATUS;
   uiWidget.history.appendChild(statusEl);
+  const filterInput = document.createElement("input");
+  filterInput.type = "search";
+  filterInput.placeholder = "Filter groups…";
+  filterInput.setAttribute("dir", "auto");
+  filterInput.setAttribute("style", fieldStyle());
+  uiWidget.history.appendChild(filterInput);
+  const selectEl = document.createElement("select");
+  selectEl.size = 8;
+  selectEl.setAttribute("dir", "auto");
+  selectEl.setAttribute("style", fieldStyle());
+  uiWidget.history.appendChild(selectEl);
   const setStatus = (text) => {
     statusEl.textContent = text;
   };
-  const formatFound = (group, count) => {
-    const base = `Found ${count} members in ${group.name}`;
-    return group.usedFallback ? `${base} (${group.fallbackReason})` : base;
+  let allGroups = [];
+  let selectedId = "";
+  const selectedGroup = () => {
+    return allGroups.find((g) => g.id === selectedId);
   };
+  const renderOptions = () => {
+    const filter = filterInput.value;
+    const visible = allGroups.filter((g) => groupMatchesFilter(g.name, filter));
+    selectEl.innerHTML = "";
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Choose a group";
+    selectEl.appendChild(placeholder);
+    for (const g of visible) {
+      const opt = document.createElement("option");
+      opt.value = g.id;
+      opt.textContent = optionLabel(g);
+      if (g.id === selectedId)
+        opt.selected = true;
+      selectEl.appendChild(opt);
+    }
+    if (selectedId && !visible.some((g) => g.id === selectedId)) {
+      selectEl.value = "";
+    } else {
+      selectEl.value = selectedId;
+    }
+  };
+  const applySelection = (id) => {
+    selectedId = id;
+    renderOptions();
+  };
+  selectEl.addEventListener("change", () => {
+    selectedId = selectEl.value;
+    const g = selectedGroup();
+    if (g) {
+      setStatus(`Selected ${g.name}`);
+    } else {
+      setStatus(allGroups.length ? `${allGroups.length} groups found` : DEFAULT_STATUS);
+    }
+  });
+  filterInput.addEventListener("input", () => {
+    renderOptions();
+  });
   let exporting = false;
   const runExport = async () => {
     if (exporting)
       return;
+    if (!selectedId) {
+      setStatus(DEFAULT_STATUS);
+      return;
+    }
     exporting = true;
     setStatus("Reading IndexedDB…");
     try {
-      const { group, count } = await exportGroupMembers();
-      setStatus(formatFound(group, count));
+      const { name, count } = await exportGroupMembers(selectedId);
+      setStatus(`Found ${count} members in ${name}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setStatus(message || "Export failed");
@@ -1102,12 +1204,38 @@ function buildWidget() {
   const btnReset = createCta();
   btnReset.appendChild(createTextSpan("Reset"));
   btnReset.addEventListener("click", () => {
+    filterInput.value = "";
+    applySelection("");
     setStatus(DEFAULT_STATUS);
   });
   uiWidget.addCta(btnReset);
   uiWidget.makeItDraggable();
   uiWidget.render();
   setDirLtr(uiWidget);
-  void runExport();
+  const loadList = async () => {
+    setStatus("Reading IndexedDB…");
+    try {
+      const { groups, headerTitle } = await loadGroupCatalog();
+      allGroups = groups;
+      if (groups.length === 0) {
+        applySelection("");
+        setStatus("No group chats found in model-storage.");
+        return;
+      }
+      const matched = matchGroupByTitle(groups, headerTitle);
+      if (matched) {
+        applySelection(matched.id);
+        setStatus(`${groups.length} groups found. Selected open chat: ${matched.name}`);
+      } else {
+        applySelection("");
+        setStatus(`${groups.length} groups found`);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setStatus(message || "Failed to list groups");
+      console.error(err);
+    }
+  };
+  void loadList();
 }
 buildWidget();
