@@ -504,6 +504,12 @@ function findSecondaryDescription(
 }
 
 class WhatsAppStorage extends ListStorage<WhatsAppMember> {
+    // In-memory source of truth. ListStorage IDB is optional cache only:
+    // once IDB opens, parent getCount/getAll/toCsvData ignore this.data,
+    // and a failed IDB put still returns true (so the history log fires
+    // while Download stays at 0). persistent:false is also ignored unless truthy.
+    localItems = new Map<string, WhatsAppMember>();
+
     get headers() {
         return [
             'Phone Number',
@@ -520,6 +526,59 @@ class WhatsAppStorage extends ListStorage<WhatsAppMember> {
             item.source ? item.source : ""
         ]
     }
+
+    async addElem(
+        identifier: string,
+        elem: WhatsAppMember,
+        updateExisting: boolean = false,
+        groupId?: string
+    ): Promise<boolean> {
+        const existing = this.localItems.get(identifier);
+        const merged = (updateExisting && existing)
+            ? { ...existing, ...elem }
+            : (existing && !updateExisting ? existing : elem);
+        this.localItems.set(identifier, merged);
+        try {
+            await super.addElem(identifier, elem, updateExisting, groupId);
+        } catch {
+            // IDB is optional cache; ignore quota / origin failures
+        }
+        return true;
+    }
+
+    async getCount(): Promise<number> {
+        return this.localItems.size;
+    }
+
+    async getAll(): Promise<Map<string, WhatsAppMember>> {
+        return this.localItems;
+    }
+
+    async getElem(identifier: string): Promise<WhatsAppMember | undefined> {
+        return this.localItems.get(identifier);
+    }
+
+    async clear(): Promise<void> {
+        this.localItems.clear();
+        try {
+            await super.clear();
+        } catch {
+            // ignore IDB clear failures
+        }
+    }
+
+    async toCsvData(): Promise<string[][]> {
+        const rows: string[][] = [];
+        rows.push(this.headers);
+        this.localItems.forEach((item) => {
+            try {
+                rows.push(this.itemToRow(item));
+            } catch (err) {
+                console.error(err);
+            }
+        });
+        return rows;
+    }
 }
 
 const memberListStore = new WhatsAppStorage({
@@ -530,11 +589,10 @@ const exportName = 'whatsAppExport';
 let logsTracker: HistoryTracker;
 
 async function updateConter(){
-    // Update member tracker counter
+    // Update member tracker counter from in-memory map (never empty IDB)
     const tracker = document.getElementById(counterId)
     if(tracker){
-        const countValue = await memberListStore.getCount();
-        tracker.textContent = countValue.toString()
+        tracker.textContent = memberListStore.localItems.size.toString()
     }
 }
 

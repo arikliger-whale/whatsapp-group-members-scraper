@@ -1,3 +1,9 @@
+var __defProp = Object.defineProperty;
+var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+var __publicField = (obj, key, value) => {
+  __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
+  return value;
+};
 const instanceOfAny = (object, constructors) => constructors.some((c) => object instanceof c);
 let idbProxyableTypes;
 let cursorAdvanceMethods;
@@ -1238,6 +1244,14 @@ function findSecondaryDescription(listItem, titleEl, name, phone) {
   return "";
 }
 class WhatsAppStorage extends ListStorage {
+  constructor() {
+    super(...arguments);
+    // In-memory source of truth. ListStorage IDB is optional cache only:
+    // once IDB opens, parent getCount/getAll/toCsvData ignore this.data,
+    // and a failed IDB put still returns true (so the history log fires
+    // while Download stays at 0). persistent:false is also ignored unless truthy.
+    __publicField(this, "localItems", /* @__PURE__ */ new Map());
+  }
   get headers() {
     return [
       "Phone Number",
@@ -1254,6 +1268,44 @@ class WhatsAppStorage extends ListStorage {
       item.source ? item.source : ""
     ];
   }
+  async addElem(identifier, elem, updateExisting = false, groupId) {
+    const existing = this.localItems.get(identifier);
+    const merged = updateExisting && existing ? { ...existing, ...elem } : existing && !updateExisting ? existing : elem;
+    this.localItems.set(identifier, merged);
+    try {
+      await super.addElem(identifier, elem, updateExisting, groupId);
+    } catch {
+    }
+    return true;
+  }
+  async getCount() {
+    return this.localItems.size;
+  }
+  async getAll() {
+    return this.localItems;
+  }
+  async getElem(identifier) {
+    return this.localItems.get(identifier);
+  }
+  async clear() {
+    this.localItems.clear();
+    try {
+      await super.clear();
+    } catch {
+    }
+  }
+  async toCsvData() {
+    const rows = [];
+    rows.push(this.headers);
+    this.localItems.forEach((item) => {
+      try {
+        rows.push(this.itemToRow(item));
+      } catch (err) {
+        console.error(err);
+      }
+    });
+    return rows;
+  }
 }
 const memberListStore = new WhatsAppStorage({
   name: "whatsapp-scraper"
@@ -1264,8 +1316,7 @@ let logsTracker;
 async function updateConter() {
   const tracker = document.getElementById(counterId);
   if (tracker) {
-    const countValue = await memberListStore.getCount();
-    tracker.textContent = countValue.toString();
+    tracker.textContent = memberListStore.localItems.size.toString();
   }
 }
 const uiWidget = new UIContainer();
