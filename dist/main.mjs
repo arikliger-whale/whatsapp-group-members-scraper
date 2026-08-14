@@ -968,6 +968,247 @@ function collectCandidates(listItem) {
   });
   return out;
 }
+function normalizeFoundPhone(text) {
+  const cleaned = stripBidi(text).replace(BIDI_AND_SPACE, "");
+  return isPhoneNumber(cleaned) ? cleaned : "";
+}
+const WID_CUS_RE = /(\d{6,15})@c\.us/;
+const WID_NON_PHONE_RE = /@(lid|g\.us|s\.whatsapp\.net|broadcast)\b/;
+function phoneFromWidText(text) {
+  if (!text)
+    return "";
+  const stripped = stripBidi(text);
+  if (WID_NON_PHONE_RE.test(stripped) && !WID_CUS_RE.test(stripped))
+    return "";
+  const m = stripped.match(WID_CUS_RE);
+  return m ? m[1] : "";
+}
+function phoneFromWidObject(obj) {
+  const server = obj.server;
+  if (server === "lid" || server === "g.us" || server === "s.whatsapp.net" || server === "broadcast") {
+    return "";
+  }
+  if (typeof obj._serialized === "string") {
+    const fromSer = phoneFromWidText(obj._serialized);
+    if (fromSer)
+      return fromSer;
+  }
+  if (server === "c.us" && obj.user != null) {
+    const fromUser = normalizeFoundPhone(String(obj.user));
+    if (fromUser)
+      return fromUser;
+  }
+  return "";
+}
+const PHONE_FIELD_NAMES = /* @__PURE__ */ new Set(["phonenumber", "phone", "e164", "number"]);
+function phoneFromNamedField(key, value) {
+  if (!PHONE_FIELD_NAMES.has(key.toLowerCase()))
+    return "";
+  if (typeof value === "string" || typeof value === "number") {
+    return normalizeFoundPhone(String(value));
+  }
+  return "";
+}
+function scanAttrsAndTextForPhone(listItem) {
+  const telLink = listItem.querySelector('a[href^="tel:"]');
+  if (telLink) {
+    const href = telLink.getAttribute("href") || "";
+    const fromTel = normalizeFoundPhone(href.replace(/^tel:/i, ""));
+    if (fromTel)
+      return fromTel;
+  }
+  const nodes = [listItem, ...Array.from(listItem.querySelectorAll("*"))];
+  for (const node of nodes) {
+    if (!(node instanceof HTMLElement))
+      continue;
+    for (const attr of Array.from(node.attributes)) {
+      const val = attr.value || "";
+      const fromWid = phoneFromWidText(val);
+      if (fromWid)
+        return fromWid;
+    }
+  }
+  const namedAttrs = ["data-id", "data-testid", "href", "aria-label", "title", "alt"];
+  const consider = (el) => {
+    if (!el || !(el instanceof HTMLElement))
+      return "";
+    for (const name of namedAttrs) {
+      const val = el.getAttribute(name);
+      if (!val)
+        continue;
+      const fromWid = phoneFromWidText(val);
+      if (fromWid)
+        return fromWid;
+      if (name !== "data-testid") {
+        const fromPhone = normalizeFoundPhone(val);
+        if (fromPhone)
+          return fromPhone;
+      }
+    }
+    return "";
+  };
+  for (const node of nodes) {
+    const direct = consider(node);
+    if (direct)
+      return direct;
+    if (node.hasAttribute("data-testid")) {
+      const parent = node.parentElement;
+      if (parent) {
+        for (const sib of Array.from(parent.children)) {
+          const fromSib = consider(sib);
+          if (fromSib)
+            return fromSib;
+        }
+      }
+    }
+  }
+  const fromText = phoneFromWidText(listItem.textContent || "");
+  if (fromText)
+    return fromText;
+  return "";
+}
+function readReactRoots(el) {
+  const roots = [];
+  try {
+    const rec = el;
+    for (const key of Object.keys(rec)) {
+      if (key.startsWith("__reactFiber") || key.startsWith("__reactProps") || key.startsWith("__reactInternalInstance")) {
+        roots.push(rec[key]);
+      }
+    }
+  } catch {
+  }
+  return roots;
+}
+const FIBER_SKIP_KEYS = /* @__PURE__ */ new Set([
+  "sibling",
+  "return",
+  "alternate",
+  "_debugOwner",
+  "_debugSource",
+  "_debugNeedsRemount",
+  "_debugHookTypes",
+  "parentNode",
+  "parentElement",
+  "ownerDocument",
+  "nextSibling",
+  "previousSibling"
+]);
+function walkReactForPhone(value, depth, seen, nameHint, requireName, nameSeen = false) {
+  if (value == null || depth > 10)
+    return "";
+  if (typeof value === "string") {
+    if (requireName && !nameSeen)
+      return "";
+    return phoneFromWidText(value);
+  }
+  if (typeof value !== "object")
+    return "";
+  if (value instanceof Node || value instanceof Window)
+    return "";
+  if (seen.has(value))
+    return "";
+  seen.add(value);
+  const rec = value;
+  const nameHere = !requireName || nameSeen || objectMentionsName(rec, nameHint, 1);
+  const fromWidObj = phoneFromWidObject(rec);
+  if (fromWidObj && nameHere)
+    return fromWidObj;
+  try {
+    for (const key of Object.keys(rec)) {
+      const fromField = phoneFromNamedField(key, rec[key]);
+      if (fromField && nameHere)
+        return fromField;
+    }
+  } catch {
+    return "";
+  }
+  try {
+    for (const key of Object.keys(rec)) {
+      if (FIBER_SKIP_KEYS.has(key))
+        continue;
+      const found = walkReactForPhone(
+        rec[key],
+        depth + 1,
+        seen,
+        nameHint,
+        requireName,
+        nameHere
+      );
+      if (found)
+        return found;
+    }
+  } catch {
+    return "";
+  }
+  return "";
+}
+function objectMentionsName(obj, nameHint, extraDepth = 0) {
+  if (!nameHint)
+    return false;
+  const needle = nameHint.trim();
+  if (!needle)
+    return false;
+  try {
+    for (const key of Object.keys(obj)) {
+      const val = obj[key];
+      if (typeof val === "string" && stripBidi(val).includes(needle))
+        return true;
+      if (extraDepth > 0 && val && typeof val === "object" && !(val instanceof Node) && objectMentionsName(val, nameHint, extraDepth - 1)) {
+        return true;
+      }
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+function collectFiberHostNodes(listItem) {
+  const nodes = [listItem];
+  const children = listItem.querySelectorAll("*");
+  const childLimit = Math.min(children.length, 24);
+  for (let i = 0; i < childLimit; i++) {
+    const child = children[i];
+    if (child instanceof HTMLElement)
+      nodes.push(child);
+  }
+  let ancestor = listItem.parentElement;
+  for (let i = 0; i < 2 && ancestor; i++) {
+    nodes.push(ancestor);
+    ancestor = ancestor.parentElement;
+  }
+  return nodes;
+}
+function scanReactForPhone(listItem, nameHint) {
+  const hosts = collectFiberHostNodes(listItem);
+  const seen = /* @__PURE__ */ new Set();
+  const ownHosts = hosts.filter((el) => el === listItem || listItem.contains(el));
+  for (const host of ownHosts) {
+    for (const root of readReactRoots(host)) {
+      const found = walkReactForPhone(root, 0, seen, nameHint, false);
+      if (found)
+        return found;
+    }
+  }
+  const ancestorHosts = hosts.filter((el) => el !== listItem && !listItem.contains(el));
+  for (const host of ancestorHosts) {
+    for (const root of readReactRoots(host)) {
+      const found = walkReactForPhone(root, 0, seen, nameHint, !!nameHint);
+      if (found)
+        return found;
+    }
+  }
+  return "";
+}
+function findHiddenPhone(listItem, nameHint) {
+  const fromAttrs = scanAttrsAndTextForPhone(listItem);
+  if (fromAttrs)
+    return fromAttrs;
+  const fromFiber = scanReactForPhone(listItem, nameHint);
+  if (fromFiber)
+    return fromFiber;
+  return "";
+}
 function findSecondaryDescription(listItem, titleEl, name, phone) {
   const dedicated = listItem.querySelector(
     '[data-testid="cell-frame-secondary"] [data-testid="selectable-text"]'
@@ -1126,12 +1367,36 @@ function listenModalChanges() {
       }
       profilePhone = "";
     }
+    if (!profilePhone) {
+      const hidden = findHiddenPhone(listItem, profileName);
+      if (hidden && isPhoneNumber(hidden)) {
+        profilePhone = hidden;
+      }
+    }
     if (!profileName && !profilePhone)
       return;
-    const identifier = profilePhone || profileName;
-    if (scrapedIds.has(identifier))
+    let identifier = profilePhone || profileName;
+    const alreadyByPhone = !!(profilePhone && scrapedIds.has(profilePhone));
+    const alreadyByName = !!(profileName && scrapedIds.has(profileName));
+    if (alreadyByPhone)
       return;
+    if (alreadyByName && !profilePhone)
+      return;
+    if (profilePhone && profileName) {
+      if (alreadyByName) {
+        identifier = profileName;
+      } else {
+        const existingByName = await memberListStore.getElem(profileName);
+        if (existingByName && !existingByName.phoneNumber) {
+          identifier = profileName;
+        }
+      }
+    }
     scrapedIds.add(identifier);
+    if (profilePhone)
+      scrapedIds.add(profilePhone);
+    if (profileName)
+      scrapedIds.add(profileName);
     const profileDescription = findSecondaryDescription(
       listItem,
       titleInfo.el,
