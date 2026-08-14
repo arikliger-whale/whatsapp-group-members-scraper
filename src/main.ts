@@ -13,6 +13,10 @@ import {
 const DB_NAME = 'model-storage';
 const DEFAULT_STATUS = 'Choose a group, then Export';
 const EXPORT_PREFIX = 'whatsAppExport';
+const PREFERRED_GROUP_HINT = 'חסד בישראל';
+const PREFERRED_GROUP_TITLE = 'חסד בישראל - עזרה רפואית';
+// ASCII hyphen, en-dash, em-dash, Hebrew maqaf
+const DASH_CHARS = /[-\u2013\u2014\u05be]/g;
 
 const BIDI_MARKS = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 const BIDI_AND_SPACE = /[\s\-\(\)\.\u00a0\u202f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
@@ -56,6 +60,14 @@ function stripBidi(text: string): string {
 
 function normalizeText(text: string): string {
     return stripBidi(text).replace(/\s+/g, ' ').trim();
+}
+
+function normalizeDashes(text: string): string {
+    return text.replace(DASH_CHARS, '-');
+}
+
+function matchKey(text: string): string {
+    return normalizeDashes(normalizeText(text)).toLowerCase();
 }
 
 function isPhoneNumber(text: string): boolean {
@@ -230,8 +242,8 @@ function chatDisplayName(chat: IdRecord): string {
 }
 
 function titleScore(header: string, name: string): number {
-    const h = normalizeText(header);
-    const n = normalizeText(name);
+    const h = matchKey(header);
+    const n = matchKey(name);
     if (!h || !n) return 0;
     if (h === n) return 1000 + n.length;
     if (n.includes(h) || h.includes(n)) return 100 + Math.min(h.length, n.length);
@@ -311,10 +323,22 @@ function matchGroupByTitle(groups: GroupOption[], headerTitle: string | null): G
 }
 
 function groupMatchesFilter(name: string, filter: string): boolean {
-    const n = normalizeText(name).toLowerCase();
-    const f = normalizeText(filter).toLowerCase();
+    const n = matchKey(name);
+    const f = matchKey(filter);
     if (!f) return true;
     return n.includes(f);
+}
+
+function findPreferredGroup(groups: GroupOption[]): GroupOption | null {
+    const hint = matchKey(PREFERRED_GROUP_HINT);
+    const full = matchKey(PREFERRED_GROUP_TITLE);
+    let hinted: GroupOption | null = null;
+    for (const g of groups) {
+        const n = matchKey(g.name);
+        if (n === full || n.includes(full)) return g;
+        if (!hinted && n.includes(hint)) hinted = g;
+    }
+    return hinted;
 }
 
 function optionLabel(group: GroupOption): string {
@@ -720,9 +744,22 @@ async function exportGroupMembers(groupId: string): Promise<{ name: string; coun
     }
 }
 
-function setDirLtr(widget: UIContainer): void {
-    widget.inner.setAttribute('dir', 'ltr');
-    widget.canva.setAttribute('dir', 'ltr');
+function stopBubble(el: HTMLElement): void {
+    el.addEventListener('mousedown', (e) => e.stopPropagation());
+    el.addEventListener('click', (e) => e.stopPropagation());
+    el.addEventListener('pointerdown', (e) => e.stopPropagation());
+}
+
+function overlayChromeStyle(): string {
+    return [
+        'position: fixed;',
+        'bottom: 24px;',
+        'right: 24px;',
+        'z-index: 2147483647;',
+        'pointer-events: auto;',
+        'width: min(420px, calc(100vw - 48px));',
+        'box-sizing: border-box;'
+    ].join('');
 }
 
 function fieldStyle(): string {
@@ -735,7 +772,47 @@ function fieldStyle(): string {
         'font-size: 13px;',
         'line-height: 1.35;',
         'margin-bottom: 6px;',
-        'padding: 6px 8px;'
+        'padding: 6px 8px;',
+        'pointer-events: auto;'
+    ].join('');
+}
+
+function listStyle(): string {
+    return [
+        'display: block;',
+        'width: 100%;',
+        'max-width: 420px;',
+        'max-height: 240px;',
+        'overflow: auto;',
+        'pointer-events: auto;',
+        'box-sizing: border-box;',
+        'font-family: monospace;',
+        'font-size: 13px;',
+        'line-height: 1.45;',
+        'margin-bottom: 6px;',
+        'border: 1px solid #c8c8d6;',
+        'border-radius: 6px;',
+        'background: #fff;'
+    ].join('');
+}
+
+function rowStyle(selected: boolean): string {
+    return [
+        'display: block;',
+        'width: 100%;',
+        'text-align: start;',
+        'white-space: normal;',
+        'overflow-wrap: break-word;',
+        'word-break: normal;',
+        'pointer-events: auto;',
+        'cursor: pointer;',
+        'border: none;',
+        'border-bottom: 1px solid #eee;',
+        'padding: 8px 10px;',
+        'box-sizing: border-box;',
+        'font: inherit;',
+        `background: ${selected ? '#dbeafe' : 'transparent'};`,
+        'color: #2f2f2f;'
     ].join('');
 }
 
@@ -753,6 +830,8 @@ function buildWidget(): void {
         'line-height: 1.35;',
         'max-width: 420px;',
         'white-space: normal;',
+        'overflow-wrap: break-word;',
+        'word-break: normal;',
         'color: #2f2f2f;',
         'box-shadow: rgba(42, 35, 66, 0.2) 0 2px 2px, rgba(45, 35, 66, 0.2) 0 7px 13px -4px;'
     ].join(''));
@@ -764,13 +843,13 @@ function buildWidget(): void {
     filterInput.placeholder = 'Filter groups…';
     filterInput.setAttribute('dir', 'auto');
     filterInput.setAttribute('style', fieldStyle());
+    stopBubble(filterInput);
     uiWidget.history.appendChild(filterInput);
 
-    const selectEl = document.createElement('select');
-    selectEl.size = 8;
-    selectEl.setAttribute('dir', 'auto');
-    selectEl.setAttribute('style', fieldStyle());
-    uiWidget.history.appendChild(selectEl);
+    const listEl = document.createElement('div');
+    listEl.setAttribute('style', listStyle());
+    stopBubble(listEl);
+    uiWidget.history.appendChild(listEl);
 
     const setStatus = (text: string) => {
         statusEl.textContent = text;
@@ -779,32 +858,39 @@ function buildWidget(): void {
     let allGroups: GroupOption[] = [];
     let selectedId = '';
 
-    const selectedGroup = (): GroupOption | undefined => {
-        return allGroups.find((g) => g.id === selectedId);
-    };
-
     const renderOptions = () => {
         const filter = filterInput.value;
         const visible = allGroups.filter((g) => groupMatchesFilter(g.name, filter));
-        selectEl.innerHTML = '';
+        listEl.innerHTML = '';
 
-        const placeholder = document.createElement('option');
-        placeholder.value = '';
-        placeholder.textContent = 'Choose a group';
-        selectEl.appendChild(placeholder);
-
-        for (const g of visible) {
-            const opt = document.createElement('option');
-            opt.value = g.id;
-            opt.textContent = optionLabel(g);
-            if (g.id === selectedId) opt.selected = true;
-            selectEl.appendChild(opt);
+        if (visible.length === 0) {
+            const empty = document.createElement('div');
+            empty.setAttribute('dir', 'auto');
+            empty.setAttribute('style', [
+                'padding: 8px 10px;',
+                'color: #666;',
+                'white-space: normal;',
+                'overflow-wrap: break-word;',
+                'word-break: normal;'
+            ].join(''));
+            empty.textContent = allGroups.length ? 'No matching groups' : 'Choose a group';
+            listEl.appendChild(empty);
+            return;
         }
 
-        if (selectedId && !visible.some((g) => g.id === selectedId)) {
-            selectEl.value = '';
-        } else {
-            selectEl.value = selectedId;
+        for (const g of visible) {
+            const row = document.createElement('button');
+            row.type = 'button';
+            row.setAttribute('dir', 'auto');
+            row.setAttribute('style', rowStyle(g.id === selectedId));
+            row.textContent = optionLabel(g);
+            stopBubble(row);
+            row.addEventListener('click', () => {
+                selectedId = g.id;
+                renderOptions();
+                setStatus(`Selected ${g.name}`);
+            });
+            listEl.appendChild(row);
         }
     };
 
@@ -812,16 +898,6 @@ function buildWidget(): void {
         selectedId = id;
         renderOptions();
     };
-
-    selectEl.addEventListener('change', () => {
-        selectedId = selectEl.value;
-        const g = selectedGroup();
-        if (g) {
-            setStatus(`Selected ${g.name}`);
-        } else {
-            setStatus(allGroups.length ? `${allGroups.length} groups found` : DEFAULT_STATUS);
-        }
-    });
 
     filterInput.addEventListener('input', () => {
         renderOptions();
@@ -866,9 +942,12 @@ function buildWidget(): void {
     });
     uiWidget.addCta(btnReset);
 
-    uiWidget.makeItDraggable();
-    uiWidget.render();
-    setDirLtr(uiWidget);
+    // Do not call makeItDraggable() — it preventDefault()s mousedown on the whole panel
+    // and blocks <input>/<button> clicks. Mount a small custom overlay instead of the
+    // full-screen pointer-events canvas.
+    uiWidget.inner.setAttribute('dir', 'ltr');
+    uiWidget.inner.setAttribute('style', overlayChromeStyle());
+    document.body.appendChild(uiWidget.inner);
 
     const loadList = async () => {
         setStatus('Reading IndexedDB…');
@@ -880,13 +959,14 @@ function buildWidget(): void {
                 setStatus('No group chats found in model-storage.');
                 return;
             }
-            const matched = matchGroupByTitle(groups, headerTitle);
+            const preferred = findPreferredGroup(groups);
+            const matched = preferred || matchGroupByTitle(groups, headerTitle);
             if (matched) {
                 applySelection(matched.id);
-                setStatus(`${groups.length} groups found. Selected open chat: ${matched.name}`);
+                setStatus(`${groups.length} groups found. Selected ${matched.name}`);
             } else {
                 applySelection('');
-                setStatus(`${groups.length} groups found`);
+                setStatus(`${groups.length} groups found. Pick a group to export.`);
             }
         } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
