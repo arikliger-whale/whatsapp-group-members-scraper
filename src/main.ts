@@ -1,26 +1,62 @@
 import {
-    ListStorage,
     UIContainer,
     createCta,
     createSpacer,
-    createTextSpan,
-    HistoryTracker,
-    LogCategory
+    createTextSpan
 } from 'browser-scraping-utils';
 
-interface WhatsAppMember {
-    profileId: string
-    name?: string
-    description?: string
-    phoneNumber?: string
-    source?: string
+/**
+ * WhatsApp Web group-member exporter.
+ * Reads IndexedDB `model-storage` (readonly). No DOM member-modal scraping.
+ */
+
+const DB_NAME = 'model-storage';
+const DEFAULT_STATUS = 'Open a group, then Export';
+const EXPORT_PREFIX = 'whatsAppExport';
+
+const BIDI_MARKS = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+const BIDI_AND_SPACE = /[\s\-\(\)\.\u00a0\u202f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+
+const CHAT_STORE_CANDIDATES = ['chat', 'chats'];
+const PARTICIPANT_STORE_CANDIDATES = ['participant', 'participants'];
+const CONTACT_STORE_CANDIDATES = ['contact', 'contacts'];
+const GROUP_META_STORE_CANDIDATES = [
+    'group-metadata',
+    'groupMetadata',
+    'group_metadata',
+    'group-meta'
+];
+
+interface MemberRow {
+    phoneNumber: string;
+    name: string;
+    pushname: string;
+    source: string;
+    id: string;
+    isAdmin?: boolean;
 }
 
-const BIDI_AND_SPACE = /[\s\-\(\)\.\u00a0\u202f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
-const BIDI_MARKS = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+interface ParticipantRef {
+    id: string;
+    isAdmin?: boolean;
+    name?: string;
+}
+
+interface ResolvedGroup {
+    id: string;
+    name: string;
+    usedFallback: boolean;
+    fallbackReason: string;
+}
+
+type IdRecord = Record<string, unknown>;
 
 function stripBidi(text: string): string {
     return text.replace(BIDI_MARKS, '');
+}
+
+function normalizeText(text: string): string {
+    return stripBidi(text).replace(/\s+/g, ' ').trim();
 }
 
 function isPhoneNumber(text: string): boolean {
@@ -28,81 +64,569 @@ function isPhoneNumber(text: string): boolean {
     return /^\+?\d{6,15}$/.test(stripped);
 }
 
-function cleanName(name: string): string {
-    return name.trim().replace(/^~\s*/u, '').replace(BIDI_MARKS, '').trim();
+function asRecord(value: unknown): IdRecord | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    return value as IdRecord;
 }
 
-function looksLikeName(text: string): boolean {
-    const t = stripBidi(text).trim();
-    if (!t) return false;
-    if (t.startsWith('~')) return true;
-    // Any letter in any script (Hebrew, Arabic, CJK, Latin, …)
-    return /[\p{L}]/u.test(t);
+function asArray(value: unknown): unknown[] {
+    if (Array.isArray(value)) return value;
+    const rec = asRecord(value);
+    if (!rec) return [];
+    if (Array.isArray(rec._models)) return rec._models;
+    if (Array.isArray(rec.models)) return rec.models;
+    if (Array.isArray(rec.toArray)) return rec.toArray as unknown[];
+    return [];
 }
 
-function cleanDescription(description: string): string | null {
-    const descriptionClean = stripBidi(description).trim();
-    if (!descriptionClean) return null;
+function serializeId(value: unknown): string {
+    if (value == null) return '';
+    if (typeof value === 'string' || typeof value === 'number') {
+        return String(value);
+    }
+    const rec = asRecord(value);
+    if (!rec) return '';
+    if (typeof rec._serialized === 'string') return rec._serialized;
+    if (typeof rec.id === 'string') return rec.id;
+    if (rec.user != null && rec.server != null) {
+        return `${rec.user}@${rec.server}`;
+    }
+    if (typeof rec.wid === 'string') return rec.wid;
+    if (rec.wid) return serializeId(rec.wid);
+    return '';
+}
 
-    const latinPlaceholders: RegExp[] = [
-        /^loading(\s+about)?(\.{0,3})?$/i,
-        /^(hey there!?\s*)?i am using whatsapp\.?$/i,
-        /^available$/i,
-        /^cargando(\s+\w+)?(\.{0,3})?$/i,
-        /^(¡?hola!?\s*)?estoy usando whatsapp\.?$/i,
-        /^disponible$/i,
-        /^carregando(\s+\w+)?(\.{0,3})?$/i,
-        /^(oi,?\s*(eu\s+)?)?estou usando o?\s*whatsapp\.?$/i,
-        /^disponível$/i,
-        /^chargement(\b.*)?(\.{0,3})?$/i,
-        /^(salut\s*!?\s*)?j['’]utilise whatsapp\.?$/i,
-        /^disponible$/i,
-        /^wird geladen(\.{0,3})?$/i,
-        /^(hallo!?\s*)?ich benutze whatsapp\.?$/i,
-        /^verfügbar$/i,
-        /^caricamento(\.{0,3})?$/i,
-        /^(ciao!?\s*)?sto usando whatsapp\.?$/i,
-        /^disponibile$/i,
-        /^(привет!?\s*)?я использую whatsapp\.?$/i,
-        /^доступен$/i,
-        /^(merhaba!?\s*)?whatsapp kullan(ıyorum|iyorum)\.?$/i,
-        /^müsait$/i,
-        /^(halo!?\s*)?saya menggunakan whatsapp\.?$/i,
-        /^(嗨[！!]?\s*)?我正在使用 whatsapp$/,
+function userPart(wid: string): string {
+    const s = normalizeText(wid);
+    const at = s.indexOf('@');
+    return at >= 0 ? s.slice(0, at) : s;
+}
+
+function serverPart(wid: string): string {
+    const s = normalizeText(wid);
+    const at = s.indexOf('@');
+    return at >= 0 ? s.slice(at + 1) : '';
+}
+
+function idsEqual(a: string, b: string): boolean {
+    const na = normalizeText(a);
+    const nb = normalizeText(b);
+    if (!na || !nb) return false;
+    if (na === nb) return true;
+    const ua = userPart(na);
+    const ub = userPart(nb);
+    const sa = serverPart(na);
+    const sb = serverPart(nb);
+    return !!ua && ua === ub && !!sa && sa === sb;
+}
+
+function pickStoreName(db: IDBDatabase, candidates: string[]): string | null {
+    const names = Array.from(db.objectStoreNames);
+    for (const wanted of candidates) {
+        if (names.includes(wanted)) return wanted;
+    }
+    const lower = names.map((n) => n.toLowerCase());
+    for (const wanted of candidates) {
+        const w = wanted.toLowerCase();
+        const exact = lower.indexOf(w);
+        if (exact >= 0) return names[exact];
+        const idx = lower.findIndex((n) => n.includes(w) || w.includes(n));
+        if (idx >= 0) return names[idx];
+    }
+    return null;
+}
+
+function openModelStorage(): Promise<IDBDatabase> {
+    return new Promise((resolve, reject) => {
+        let req: IDBOpenDBRequest;
+        try {
+            // No version: open the current schema. Never upgrade/delete.
+            req = indexedDB.open(DB_NAME);
+        } catch (err) {
+            reject(err);
+            return;
+        }
+        req.onerror = () => {
+            reject(req.error || new Error('Failed to open IndexedDB model-storage'));
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onupgradeneeded = (ev) => {
+            if (ev.oldVersion === 0) {
+                try {
+                    req.transaction?.abort();
+                } catch {
+                    // ignore
+                }
+                reject(new Error('WhatsApp model-storage is missing. Open https://web.whatsapp.com first.'));
+            }
+        };
+    });
+}
+
+function getAllFromStore(db: IDBDatabase, storeName: string): Promise<unknown[]> {
+    return new Promise((resolve, reject) => {
+        try {
+            const tx = db.transaction(storeName, 'readonly');
+            const req = tx.objectStore(storeName).getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => reject(req.error || new Error(`Failed to read store ${storeName}`));
+        } catch (err) {
+            reject(err);
+        }
+    });
+}
+
+async function readStore(db: IDBDatabase, candidates: string[]): Promise<unknown[]> {
+    const name = pickStoreName(db, candidates);
+    if (!name) return [];
+    try {
+        return await getAllFromStore(db, name);
+    } catch {
+        return [];
+    }
+}
+
+function getVisibleGroupTitle(): string | null {
+    const selectors = [
+        '#main header span[dir="auto"][title]',
+        '#main header span[title]',
+        '#main header span[dir="auto"]',
+        'header span[dir="auto"][title]',
+        'header span[title]',
+        'header span[dir="auto"]'
     ];
+    for (const sel of selectors) {
+        const el = document.querySelector<HTMLElement>(sel);
+        if (!el) continue;
+        const raw = el.getAttribute('title') || el.textContent || '';
+        const t = normalizeText(raw);
+        if (t) return t;
+    }
+    const styled = document.querySelectorAll("header span[style*='height']:not(.copyable-text)");
+    if (styled.length === 1 && styled[0].textContent) {
+        const t = normalizeText(styled[0].textContent);
+        if (t) return t;
+    }
+    return null;
+}
 
-    for (const re of latinPlaceholders) {
-        if (re.test(descriptionClean)) return null;
+function chatWid(chat: IdRecord): string {
+    return serializeId(chat.id) || serializeId(chat._id) || '';
+}
+
+function isGroupChat(chat: IdRecord): boolean {
+    const id = chatWid(chat);
+    if (id.endsWith('@g.us')) return true;
+    if (chat.isGroup === true) return true;
+    if (chat.kind === 'group') return true;
+    return false;
+}
+
+function chatDisplayName(chat: IdRecord): string {
+    const fields = [chat.name, chat.formattedTitle, chat.subject, chat.displayedTitle];
+    for (const f of fields) {
+        if (typeof f === 'string' && normalizeText(f)) return normalizeText(f);
+    }
+    return '';
+}
+
+function chatTimestamp(chat: IdRecord): number {
+    const fields = [
+        chat.t,
+        chat.timestamp,
+        chat.lastMessageRecvTimestamp,
+        chat.msgTimestamp,
+        chat.conversationTimestamp
+    ];
+    for (const f of fields) {
+        const n = Number(f);
+        if (Number.isFinite(n) && n > 0) return n;
+    }
+    return 0;
+}
+
+function titleScore(header: string, name: string): number {
+    const h = normalizeText(header);
+    const n = normalizeText(name);
+    if (!h || !n) return 0;
+    if (h === n) return 1000 + n.length;
+    if (n.includes(h) || h.includes(n)) return 100 + Math.min(h.length, n.length);
+    return 0;
+}
+
+function metaSubject(meta: IdRecord): string {
+    const fields = [meta.subject, meta.name, meta.formattedTitle];
+    for (const f of fields) {
+        if (typeof f === 'string' && normalizeText(f)) return normalizeText(f);
+    }
+    return '';
+}
+
+function metaWid(meta: IdRecord): string {
+    return serializeId(meta.id) || serializeId(meta._id) || serializeId(meta.groupId) || '';
+}
+
+function resolveGroup(
+    chats: IdRecord[],
+    metas: IdRecord[],
+    headerTitle: string | null
+): ResolvedGroup | null {
+    const groups = chats.filter(isGroupChat);
+    const metaById = new Map<string, IdRecord>();
+    for (const meta of metas) {
+        const id = metaWid(meta);
+        if (id) metaById.set(id, meta);
     }
 
-    // Hebrew / Arabic: exact-enough (do not rely on case folding)
-    const rtlPlaceholders: RegExp[] = [
-        /^טוען(\s+.*)?$/,
-        /^(היי[!,]?\s*)?אני משתמש(ת)? ב-?WhatsApp$/,
-        /^זמינ[הן]$/,
-        /^جاري التحميل/,
-        /^(مرحبا!?\s*)?أنا أستخدم (واتساب|WhatsApp)$/,
-        /^متاح$/,
-        /^Я использую WhatsApp$/,
-        /^Доступен$/,
-        /^我正在使用 WhatsApp$/,
-    ];
+    const enriched = groups.map((chat) => {
+        const id = chatWid(chat);
+        const meta = metaById.get(id);
+        const name = chatDisplayName(chat) || (meta ? metaSubject(meta) : '');
+        return { id, name, t: chatTimestamp(chat), chat };
+    }).filter((g) => g.id);
 
-    for (const re of rtlPlaceholders) {
-        if (re.test(descriptionClean)) return null;
+    if (enriched.length === 0) {
+        // group-metadata only (no chat store / no @g.us chats)
+        const fromMeta = metas
+            .map((meta) => ({
+                id: metaWid(meta),
+                name: metaSubject(meta),
+                t: Number(meta.t || meta.creation || 0) || 0
+            }))
+            .filter((g) => g.id.endsWith('@g.us') || g.id);
+        if (fromMeta.length === 0) return null;
+        return pickBest(fromMeta, headerTitle);
     }
 
-    return descriptionClean;
+    return pickBest(enriched, headerTitle);
 }
 
-function rowToCsvLine(row: Array<string | number | null | undefined | Date>): string {
+function pickBest(
+    groups: Array<{ id: string; name: string; t: number }>,
+    headerTitle: string | null
+): ResolvedGroup | null {
+    if (groups.length === 0) return null;
+
+    if (headerTitle) {
+        let best: { id: string; name: string; t: number; score: number } | null = null;
+        for (const g of groups) {
+            const score = titleScore(headerTitle, g.name);
+            if (score <= 0) continue;
+            if (
+                !best ||
+                score > best.score ||
+                (score === best.score && g.t > best.t)
+            ) {
+                best = { ...g, score };
+            }
+        }
+        if (best) {
+            return { id: best.id, name: best.name || headerTitle, usedFallback: false, fallbackReason: '' };
+        }
+    }
+
+    const withTs = groups.filter((g) => g.t > 0).sort((a, b) => b.t - a.t);
+    const chosen = withTs[0] || groups[0];
+    const reason = headerTitle
+        ? 'no header match; used most recently active group'
+        : (withTs[0] ? 'used most recently active group' : 'used first group chat');
+    return {
+        id: chosen.id,
+        name: chosen.name || chosen.id,
+        usedFallback: true,
+        fallbackReason: reason
+    };
+}
+
+function extractParticipant(value: unknown): ParticipantRef | null {
+    if (typeof value === 'string' || typeof value === 'number') {
+        const id = String(value);
+        return id ? { id } : null;
+    }
+    const rec = asRecord(value);
+    if (!rec) return null;
+    const id =
+        serializeId(rec.id) ||
+        serializeId(rec.wid) ||
+        serializeId(rec.jid) ||
+        serializeId(rec.participant) ||
+        (typeof rec.user === 'string' && typeof rec.server === 'string'
+            ? `${rec.user}@${rec.server}`
+            : '');
+    if (!id) return null;
+    const nameFields = [rec.name, rec.pushname, rec.verifiedName, rec.shortName];
+    let name = '';
+    for (const f of nameFields) {
+        if (typeof f === 'string' && normalizeText(f)) {
+            name = normalizeText(f);
+            break;
+        }
+    }
+    return {
+        id,
+        isAdmin: !!(rec.isAdmin || rec.isSuperAdmin),
+        name: name || undefined
+    };
+}
+
+function flattenParticipants(value: unknown): ParticipantRef[] {
+    const out: ParticipantRef[] = [];
+    const seen = new Set<string>();
+    const add = (p: ParticipantRef | null) => {
+        if (!p || !p.id || seen.has(p.id)) return;
+        seen.add(p.id);
+        out.push(p);
+    };
+
+    if (typeof value === 'string' || typeof value === 'number') {
+        add(extractParticipant(value));
+        return out;
+    }
+    const arr = asArray(value);
+    if (arr.length > 0) {
+        for (const item of arr) add(extractParticipant(item));
+        return out;
+    }
+    const rec = asRecord(value);
+    if (!rec) return out;
+    if (rec.participants != null) {
+        return flattenParticipants(rec.participants);
+    }
+    add(extractParticipant(rec));
+    return out;
+}
+
+function collectParticipants(
+    groupId: string,
+    chats: IdRecord[],
+    participantRows: IdRecord[],
+    metas: IdRecord[]
+): ParticipantRef[] {
+    const out: ParticipantRef[] = [];
+    const seen = new Set<string>();
+    const addAll = (items: ParticipantRef[]) => {
+        for (const p of items) {
+            if (!p.id || seen.has(p.id)) continue;
+            seen.add(p.id);
+            out.push(p);
+        }
+    };
+
+    for (const row of participantRows) {
+        const rowGroup =
+            serializeId(row.groupId) ||
+            (serializeId(row.id).endsWith('@g.us') ? serializeId(row.id) : '');
+        if (rowGroup && idsEqual(rowGroup, groupId)) {
+            if (row.participants != null) {
+                addAll(flattenParticipants(row.participants));
+            } else {
+                // inverted membership row: groupId + one participant
+                const one = extractParticipant(row);
+                if (one && !idsEqual(one.id, groupId)) addAll([one]);
+            }
+            continue;
+        }
+        // Some schemas key the row by group id
+        if (idsEqual(serializeId(row.id), groupId) && row.participants != null) {
+            addAll(flattenParticipants(row.participants));
+        }
+    }
+
+    for (const chat of chats) {
+        if (!idsEqual(chatWid(chat), groupId)) continue;
+        if (chat.participants != null) addAll(flattenParticipants(chat.participants));
+        if (chat.groupMetadata != null) {
+            const gm = asRecord(chat.groupMetadata);
+            if (gm && gm.participants != null) addAll(flattenParticipants(gm.participants));
+        }
+    }
+
+    for (const meta of metas) {
+        if (!idsEqual(metaWid(meta), groupId)) continue;
+        if (meta.participants != null) addAll(flattenParticipants(meta.participants));
+        if (meta.participantsList != null) addAll(flattenParticipants(meta.participantsList));
+    }
+
+    return out;
+}
+
+function contactKeys(contact: IdRecord): string[] {
+    const keys: string[] = [];
+    const add = (v: unknown) => {
+        const s = serializeId(v);
+        if (!s) return;
+        keys.push(s);
+        const u = userPart(s);
+        if (u) keys.push(u);
+    };
+    add(contact.id);
+    add(contact._id);
+    add(contact.wid);
+    add(contact.jid);
+    add(contact.phoneNumber);
+    add(contact.lid);
+    add(contact.lidJid);
+    add(contact.pnJid);
+    if (typeof contact.user === 'string') keys.push(contact.user);
+    return keys;
+}
+
+function buildContactIndex(contacts: IdRecord[]): Map<string, IdRecord> {
+    const index = new Map<string, IdRecord>();
+    for (const contact of contacts) {
+        for (const key of contactKeys(contact)) {
+            const existing = index.get(key);
+            if (!existing) {
+                index.set(key, contact);
+            } else {
+                // Prefer the record that has a phoneNumber / name
+                const existingPhone = serializeId(existing.phoneNumber);
+                const nextPhone = serializeId(contact.phoneNumber);
+                const existingName = typeof existing.name === 'string' ? existing.name : '';
+                const nextName = typeof contact.name === 'string' ? contact.name : '';
+                if ((!existingPhone && nextPhone) || (!existingName && nextName)) {
+                    index.set(key, { ...existing, ...contact });
+                }
+            }
+        }
+    }
+    return index;
+}
+
+function lookupContact(index: Map<string, IdRecord>, participantId: string): IdRecord | undefined {
+    const id = normalizeText(participantId);
+    if (!id) return undefined;
+    return index.get(id) || index.get(userPart(id));
+}
+
+function plusFromContact(contact: IdRecord | undefined): boolean {
+    if (!contact) return false;
+    const fields = [contact.phoneNumber, contact.e164, contact.number, contact.formattedPhone];
+    for (const f of fields) {
+        if (typeof f === 'string' && f.includes('+')) return true;
+    }
+    return false;
+}
+
+function digitsFromCus(wid: string): string {
+    const user = userPart(wid);
+    const cleaned = user.replace(BIDI_AND_SPACE, '');
+    if (/^\+?\d{6,15}$/.test(cleaned)) {
+        return cleaned.replace(/^\+/, '');
+    }
+    const only = user.replace(/\D/g, '');
+    return only.length >= 6 && only.length <= 15 ? only : '';
+}
+
+function phoneFromContactField(value: unknown): string {
+    const s = serializeId(value);
+    if (!s) return '';
+    if (s.endsWith('@c.us')) return digitsFromCus(s);
+    if (s.endsWith('@lid') || s.endsWith('@g.us') || s.endsWith('@s.whatsapp.net')) return '';
+    if (isPhoneNumber(s)) return s.replace(BIDI_AND_SPACE, '').replace(/^\+/, '');
+    return '';
+}
+
+function resolvePhone(participantId: string, contact: IdRecord | undefined): string {
+    const id = normalizeText(participantId);
+    let phone = '';
+    if (id.endsWith('@c.us')) {
+        phone = digitsFromCus(id);
+    } else if (id.endsWith('@lid')) {
+        if (contact) {
+            phone =
+                phoneFromContactField(contact.phoneNumber) ||
+                phoneFromContactField(contact.id) ||
+                phoneFromContactField(contact.pnJid) ||
+                phoneFromContactField(contact.e164);
+            // Only accept @c.us-backed phones for LID rows
+            const pn = serializeId(contact.phoneNumber);
+            const cid = serializeId(contact.id);
+            if (!pn.endsWith('@c.us') && !cid.endsWith('@c.us') && !serializeId(contact.pnJid).endsWith('@c.us')) {
+                if (!phoneFromContactField(contact.phoneNumber) && !phoneFromContactField(contact.e164)) {
+                    phone = '';
+                }
+            }
+        }
+    } else {
+        phone = digitsFromCus(id) || phoneFromContactField(id);
+    }
+
+    if (!phone && contact) {
+        phone =
+            phoneFromContactField(contact.phoneNumber) ||
+            (serializeId(contact.id).endsWith('@c.us') ? digitsFromCus(serializeId(contact.id)) : '');
+    }
+
+    if (!phone) return '';
+    if (plusFromContact(contact)) return `+${phone.replace(/^\+/, '')}`;
+    return phone.replace(/^\+/, '');
+}
+
+function contactName(contact: IdRecord | undefined, fallback?: string): string {
+    if (contact) {
+        const fields = [contact.name, contact.pushname, contact.verifiedName, contact.shortName];
+        for (const f of fields) {
+            if (typeof f === 'string' && normalizeText(f)) return normalizeText(f);
+        }
+    }
+    return fallback ? normalizeText(fallback) : '';
+}
+
+function contactPushname(contact: IdRecord | undefined): string {
+    if (contact && typeof contact.pushname === 'string') {
+        return normalizeText(contact.pushname);
+    }
+    return '';
+}
+
+function joinMembers(
+    participants: ParticipantRef[],
+    contacts: IdRecord[],
+    source: string
+): MemberRow[] {
+    const index = buildContactIndex(contacts);
+    const rows: MemberRow[] = [];
+    const seen = new Set<string>();
+
+    for (const p of participants) {
+        const contact = lookupContact(index, p.id);
+        const phone = resolvePhone(p.id, contact);
+        const name = contactName(contact, p.name);
+        const pushname = contactPushname(contact);
+        const id = normalizeText(p.id);
+        const key = phone || id;
+        if (!key || seen.has(key)) {
+            // If we already stored a LID-only row and now have a phone, upgrade it
+            if (phone && id && seen.has(id)) {
+                const existing = rows.find((r) => r.id === id && !r.phoneNumber);
+                if (existing) {
+                    existing.phoneNumber = phone;
+                    seen.add(phone);
+                }
+            }
+            continue;
+        }
+        seen.add(key);
+        if (phone) seen.add(phone);
+        if (id) seen.add(id);
+        rows.push({
+            phoneNumber: phone,
+            name,
+            pushname,
+            source,
+            id,
+            isAdmin: p.isAdmin
+        });
+    }
+    return rows;
+}
+
+function rowToCsvLine(row: Array<string | number | null | undefined>): string {
     let line = '';
     for (let i = 0; i < row.length; i++) {
         const cell = row[i];
         let value = (cell === null || cell === undefined) ? '' : cell.toString();
-        if (cell instanceof Date) {
-            value = cell.toLocaleString();
-        }
         value = value.replace(/"/g, '""');
         if (value.search(/("|,|\n)/g) >= 0) {
             value = '"' + value + '"';
@@ -113,8 +637,7 @@ function rowToCsvLine(row: Array<string | number | null | undefined | Date>): st
     return line + '\n';
 }
 
-// Local exporter: same quoting as browser-scraping-utils, but UTF-8 with BOM for Excel.
-function exportToCsvWithBom(filename: string, rows: Array<Array<string | number | null | undefined | Date>>): void {
+function exportToCsvWithBom(filename: string, rows: Array<Array<string | number | null | undefined>>): void {
     let csvFile = '';
     for (let i = 0; i < rows.length; i++) {
         csvFile += rowToCsvLine(rows[i]);
@@ -128,930 +651,133 @@ function exportToCsvWithBom(filename: string, rows: Array<Array<string | number 
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
+        URL.revokeObjectURL(url);
     }
 }
 
-function findModalElem(root: ParentNode | Document = document): HTMLElement | null {
-    const animate = root.querySelector('[data-animate-modal-body="true"]') as HTMLElement | null;
-    if (animate) return animate;
-
-    const dialogs = root.querySelectorAll<HTMLElement>('div[role="dialog"]');
-    for (const dialog of Array.from(dialogs)) {
-        if (dialog.querySelector('[role="listitem"]')) {
-            return dialog;
-        }
+function membersToCsv(rows: MemberRow[]): Array<Array<string>> {
+    const out: Array<Array<string>> = [
+        ['Phone Number', 'Name', 'Pushname', 'Source', 'Id']
+    ];
+    for (const row of rows) {
+        out.push([
+            row.phoneNumber,
+            row.name,
+            row.pushname,
+            row.source,
+            row.id
+        ]);
     }
-    if (dialogs.length === 1) return dialogs[0];
-    return null;
-}
-
-function nodeIsOrContainsModal(htmlNode: HTMLElement): boolean {
-    if (!htmlNode || htmlNode.nodeType !== 1) return false;
-    const matches = typeof htmlNode.matches === 'function'
-        ? htmlNode.matches.bind(htmlNode)
-        : () => false;
-    if (matches('[data-animate-modal-body="true"]')) return true;
-    if (matches('div[role="dialog"]')) return true;
-    if (typeof htmlNode.querySelector !== 'function') return false;
-    if (htmlNode.querySelector('[data-animate-modal-body="true"]')) return true;
-    if (htmlNode.querySelector('div[role="dialog"]')) return true;
-    return false;
-}
-
-function getGroupSourceName(): string | null {
-    const groupNameNode = document.querySelectorAll("header span[style*='height']:not(.copyable-text)");
-    if (groupNameNode.length === 1 && groupNameNode[0].textContent) {
-        return stripBidi(groupNameNode[0].textContent).trim() || null;
-    }
-    const dirAuto = document.querySelector<HTMLElement>('header span[dir="auto"][title]');
-    if (dirAuto) {
-        const t = dirAuto.getAttribute('title') || dirAuto.textContent;
-        if (t && t.trim()) return stripBidi(t).trim();
-    }
-    const titleSpan = document.querySelector<HTMLElement>('header span[title]');
-    if (titleSpan) {
-        const t = titleSpan.getAttribute('title') || titleSpan.textContent;
-        if (t && t.trim()) return stripBidi(t).trim();
-    }
-    return null;
-}
-
-function getListItemTitle(listItem: HTMLElement): { text: string; el: HTMLElement } | null {
-    const titleSpan =
-        listItem.querySelector<HTMLElement>('[data-testid="cell-frame-title"] span[title]') ||
-        listItem.querySelector<HTMLElement>('span[title]') ||
-        listItem.querySelector<HTMLElement>('span[dir="auto"]');
-    if (!titleSpan) return null;
-    const text = stripBidi(titleSpan.getAttribute('title') || titleSpan.textContent || '').trim();
-    if (!text) return null;
-    return { text, el: titleSpan };
-}
-
-function collectCandidates(listItem: HTMLElement): string[] {
-    const seen = new Set<string>();
-    const out: string[] = [];
-    const add = (s: string | null | undefined) => {
-        const v = stripBidi(s || '').trim();
-        if (!v || seen.has(v)) return;
-        seen.add(v);
-        out.push(v);
-    };
-    listItem.querySelectorAll('span[title]').forEach((el) => {
-        add(el.getAttribute('title'));
-        add(el.textContent);
-    });
-    listItem.querySelectorAll('span[dir="auto"]').forEach((el) => {
-        add(el.getAttribute('title'));
-        add(el.textContent);
-    });
-    listItem.querySelectorAll('[role="gridcell"]').forEach((el) => {
-        add(el.textContent);
-    });
     return out;
 }
 
-function normalizeFoundPhone(text: string): string {
-    const cleaned = stripBidi(text).replace(BIDI_AND_SPACE, '');
-    return isPhoneNumber(cleaned) ? cleaned : '';
-}
+async function exportGroupMembers(): Promise<{ group: ResolvedGroup; count: number }> {
+    const db = await openModelStorage();
+    try {
+        const [chatRows, participantRows, contactRows, metaRows] = await Promise.all([
+            readStore(db, CHAT_STORE_CANDIDATES),
+            readStore(db, PARTICIPANT_STORE_CANDIDATES),
+            readStore(db, CONTACT_STORE_CANDIDATES),
+            readStore(db, GROUP_META_STORE_CANDIDATES)
+        ]);
 
-const WID_CUS_RE = /(\d{6,15})@c\.us/;
-const WID_NON_PHONE_RE = /@(lid|g\.us|s\.whatsapp\.net|broadcast)\b/;
+        const chats = chatRows.map(asRecord).filter((r): r is IdRecord => !!r);
+        const participantsStore = participantRows.map(asRecord).filter((r): r is IdRecord => !!r);
+        const contacts = contactRows.map(asRecord).filter((r): r is IdRecord => !!r);
+        const metas = metaRows.map(asRecord).filter((r): r is IdRecord => !!r);
 
-function phoneFromWidText(text: string): string {
-    if (!text) return '';
-    const stripped = stripBidi(text);
-    // LIDs / group / broadcast ids are not phone numbers
-    if (WID_NON_PHONE_RE.test(stripped) && !WID_CUS_RE.test(stripped)) return '';
-    const m = stripped.match(WID_CUS_RE);
-    return m ? m[1] : '';
-}
+        const headerTitle = getVisibleGroupTitle();
+        const group = resolveGroup(chats, metas, headerTitle);
+        if (!group) {
+            throw new Error('No group chat found in model-storage. Open a group on WhatsApp Web, then Export.');
+        }
 
-function phoneFromWidObject(obj: Record<string, unknown>): string {
-    const server = obj.server;
-    if (
-        server === 'lid' ||
-        server === 'g.us' ||
-        server === 's.whatsapp.net' ||
-        server === 'broadcast'
-    ) {
-        return '';
-    }
-    if (typeof obj._serialized === 'string') {
-        const fromSer = phoneFromWidText(obj._serialized);
-        if (fromSer) return fromSer;
-    }
-    if (server === 'c.us' && obj.user != null) {
-        const fromUser = normalizeFoundPhone(String(obj.user));
-        if (fromUser) return fromUser;
-    }
-    return '';
-}
-
-const PHONE_FIELD_NAMES = new Set(['phonenumber', 'phone', 'e164', 'number']);
-
-function phoneFromNamedField(key: string, value: unknown): string {
-    if (!PHONE_FIELD_NAMES.has(key.toLowerCase())) return '';
-    if (typeof value === 'string' || typeof value === 'number') {
-        return normalizeFoundPhone(String(value));
-    }
-    return '';
-}
-
-function scanAttrsAndTextForPhone(listItem: HTMLElement): string {
-    const telLink = listItem.querySelector<HTMLAnchorElement>('a[href^="tel:"]');
-    if (telLink) {
-        const href = telLink.getAttribute('href') || '';
-        const fromTel = normalizeFoundPhone(href.replace(/^tel:/i, ''));
-        if (fromTel) return fromTel;
-    }
-
-    const nodes: Element[] = [listItem, ...Array.from(listItem.querySelectorAll('*'))];
-    for (const node of nodes) {
-        if (!(node instanceof HTMLElement)) continue;
-        for (const attr of Array.from(node.attributes)) {
-            const val = attr.value || '';
-            const fromWid = phoneFromWidText(val);
-            if (fromWid) return fromWid;
+        const participants = collectParticipants(group.id, chats, participantsStore, metas);
+        const members = joinMembers(participants, contacts, group.name);
+        const timestamp = new Date().toISOString();
+        exportToCsvWithBom(`${EXPORT_PREFIX}-${timestamp}.csv`, membersToCsv(members));
+        return { group, count: members.length };
+    } finally {
+        try {
+            db.close();
+        } catch {
+            // ignore
         }
     }
+}
 
-    const namedAttrs = ['data-id', 'data-testid', 'href', 'aria-label', 'title', 'alt'];
-    const consider = (el: Element | null) => {
-        if (!el || !(el instanceof HTMLElement)) return '';
-        for (const name of namedAttrs) {
-            const val = el.getAttribute(name);
-            if (!val) continue;
-            const fromWid = phoneFromWidText(val);
-            if (fromWid) return fromWid;
-            if (name !== 'data-testid') {
-                const fromPhone = normalizeFoundPhone(val);
-                if (fromPhone) return fromPhone;
-            }
-        }
-        return '';
+function setDirLtr(widget: UIContainer): void {
+    widget.inner.setAttribute('dir', 'ltr');
+    widget.canva.setAttribute('dir', 'ltr');
+}
+
+function buildWidget(): void {
+    const uiWidget = new UIContainer();
+    const statusEl = document.createElement('div');
+    statusEl.setAttribute('style', [
+        'text-align: left;',
+        'background: #f5f5fa;',
+        'padding: 8px 10px;',
+        'margin-bottom: 8px;',
+        'border-radius: 8px;',
+        'font-family: monospace;',
+        'font-size: 14px;',
+        'line-height: 1.35;',
+        'max-width: 420px;',
+        'white-space: normal;',
+        'color: #2f2f2f;',
+        'box-shadow: rgba(42, 35, 66, 0.2) 0 2px 2px, rgba(45, 35, 66, 0.2) 0 7px 13px -4px;'
+    ].join(''));
+    statusEl.textContent = DEFAULT_STATUS;
+    uiWidget.history.appendChild(statusEl);
+
+    const setStatus = (text: string) => {
+        statusEl.textContent = text;
     };
 
-    for (const node of nodes) {
-        const direct = consider(node);
-        if (direct) return direct;
-        if (node.hasAttribute('data-testid')) {
-            const parent = node.parentElement;
-            if (parent) {
-                for (const sib of Array.from(parent.children)) {
-                    const fromSib = consider(sib);
-                    if (fromSib) return fromSib;
-                }
-            }
-        }
-    }
+    const formatFound = (group: ResolvedGroup, count: number): string => {
+        const base = `Found ${count} members in ${group.name}`;
+        return group.usedFallback ? `${base} (${group.fallbackReason})` : base;
+    };
 
-    const fromText = phoneFromWidText(listItem.textContent || '');
-    if (fromText) return fromText;
-    return '';
-}
-
-function readReactRoots(el: Element): unknown[] {
-    const roots: unknown[] = [];
-    try {
-        const rec = el as unknown as Record<string, unknown>;
-        for (const key of Object.keys(rec)) {
-            if (
-                key.startsWith('__reactFiber') ||
-                key.startsWith('__reactProps') ||
-                key.startsWith('__reactInternalInstance')
-            ) {
-                roots.push(rec[key]);
-            }
-        }
-    } catch {
-        // ignore exotic host objects
-    }
-    return roots;
-}
-
-const FIBER_SKIP_KEYS = new Set([
-    'sibling',
-    'return',
-    'alternate',
-    '_debugOwner',
-    '_debugSource',
-    '_debugNeedsRemount',
-    '_debugHookTypes',
-    'parentNode',
-    'parentElement',
-    'ownerDocument',
-    'nextSibling',
-    'previousSibling'
-]);
-
-function walkReactForPhone(
-    value: unknown,
-    depth: number,
-    seen: Set<unknown>,
-    nameHint?: string,
-    requireName?: boolean,
-    nameSeen: boolean = false
-): string {
-    if (value == null || depth > 10) return '';
-    if (typeof value === 'string') {
-        if (requireName && !nameSeen) return '';
-        return phoneFromWidText(value);
-    }
-    if (typeof value !== 'object') return '';
-    if (value instanceof Node || value instanceof Window) return '';
-    if (seen.has(value)) return '';
-    seen.add(value);
-
-    const rec = value as Record<string, unknown>;
-    // Name may sit on this object (contact.name) while the Wid is nested (contact.id)
-    const nameHere = !requireName || nameSeen || objectMentionsName(rec, nameHint, 1);
-
-    const fromWidObj = phoneFromWidObject(rec);
-    if (fromWidObj && nameHere) return fromWidObj;
-
-    try {
-        for (const key of Object.keys(rec)) {
-            const fromField = phoneFromNamedField(key, rec[key]);
-            if (fromField && nameHere) return fromField;
-        }
-    } catch {
-        return '';
-    }
-
-    try {
-        for (const key of Object.keys(rec)) {
-            if (FIBER_SKIP_KEYS.has(key)) continue;
-            const found = walkReactForPhone(
-                rec[key],
-                depth + 1,
-                seen,
-                nameHint,
-                requireName,
-                nameHere
-            );
-            if (found) return found;
-        }
-    } catch {
-        return '';
-    }
-    return '';
-}
-
-function objectMentionsName(
-    obj: Record<string, unknown>,
-    nameHint?: string,
-    extraDepth: number = 0
-): boolean {
-    if (!nameHint) return false;
-    const needle = nameHint.trim();
-    if (!needle) return false;
-    try {
-        for (const key of Object.keys(obj)) {
-            const val = obj[key];
-            if (typeof val === 'string' && stripBidi(val).includes(needle)) return true;
-            if (
-                extraDepth > 0 &&
-                val &&
-                typeof val === 'object' &&
-                !(val instanceof Node) &&
-                objectMentionsName(val as Record<string, unknown>, nameHint, extraDepth - 1)
-            ) {
-                return true;
-            }
-        }
-    } catch {
-        return false;
-    }
-    return false;
-}
-
-function collectFiberHostNodes(listItem: HTMLElement): HTMLElement[] {
-    const nodes: HTMLElement[] = [listItem];
-    const children = listItem.querySelectorAll('*');
-    const childLimit = Math.min(children.length, 24);
-    for (let i = 0; i < childLimit; i++) {
-        const child = children[i];
-        if (child instanceof HTMLElement) nodes.push(child);
-    }
-    let ancestor = listItem.parentElement;
-    for (let i = 0; i < 2 && ancestor; i++) {
-        nodes.push(ancestor);
-        ancestor = ancestor.parentElement;
-    }
-    return nodes;
-}
-
-function scanReactForPhone(listItem: HTMLElement, nameHint?: string): string {
-    const hosts = collectFiberHostNodes(listItem);
-    const seen = new Set<unknown>();
-
-    // List item + children: this row's own fiber/props (do not require name match)
-    const ownHosts = hosts.filter((el) => el === listItem || listItem.contains(el));
-    for (const host of ownHosts) {
-        for (const root of readReactRoots(host)) {
-            const found = walkReactForPhone(root, 0, seen, nameHint, false);
-            if (found) return found;
-        }
-    }
-
-    // A couple of ancestors: require the row name nearby so we do not
-    // pick a sibling member's Wid out of the virtualized list fiber.
-    const ancestorHosts = hosts.filter((el) => el !== listItem && !listItem.contains(el));
-    for (const host of ancestorHosts) {
-        for (const root of readReactRoots(host)) {
-            const found = walkReactForPhone(root, 0, seen, nameHint, !!nameHint);
-            if (found) return found;
-        }
-    }
-    return '';
-}
-
-function findHiddenPhone(listItem: HTMLElement, nameHint?: string): string {
-    const fromAttrs = scanAttrsAndTextForPhone(listItem);
-    if (fromAttrs) return fromAttrs;
-    const fromFiber = scanReactForPhone(listItem, nameHint);
-    if (fromFiber) return fromFiber;
-    return '';
-}
-
-function findSecondaryDescription(
-    listItem: HTMLElement,
-    titleEl: HTMLElement | null,
-    name: string,
-    phone: string
-): string {
-    const dedicated = listItem.querySelector<HTMLElement>(
-        '[data-testid="cell-frame-secondary"] [data-testid="selectable-text"]'
-    );
-    if (dedicated && dedicated.textContent) {
-        const desc = cleanDescription(dedicated.textContent);
-        if (desc && desc !== name && desc !== phone) return desc;
-    }
-
-    const dirAutos = Array.from(listItem.querySelectorAll<HTMLElement>('span[dir="auto"]'));
-    for (const el of dirAutos) {
-        if (titleEl && (el === titleEl || titleEl.contains(el) || el.contains(titleEl))) continue;
-        if (el.closest('[data-testid="cell-frame-title"]')) continue;
-        const text = stripBidi(el.getAttribute('title') || el.textContent || '').trim();
-        if (!text) continue;
-        if (isPhoneNumber(text)) continue;
-        if (name && (text === name || cleanName(text) === name)) continue;
-        const desc = cleanDescription(text);
-        if (desc && desc !== name && desc !== phone) return desc;
-    }
-    return '';
-}
-
-class WhatsAppStorage extends ListStorage<WhatsAppMember> {
-    // In-memory source of truth. ListStorage IDB is optional cache only:
-    // once IDB opens, parent getCount/getAll/toCsvData ignore this.data,
-    // and a failed IDB put still returns true (so the history log fires
-    // while Download stays at 0). persistent:false is also ignored unless truthy.
-    localItems = new Map<string, WhatsAppMember>();
-
-    get headers() {
-        return [
-            'Phone Number',
-            'Name',
-            'Description',
-            'Source'
-        ]
-    }
-    itemToRow(item: WhatsAppMember): string[]{
-        return [
-            item.phoneNumber ? item.phoneNumber : "",
-            item.name ? item.name : "",
-            item.description ? item.description : "",
-            item.source ? item.source : ""
-        ]
-    }
-
-    async addElem(
-        identifier: string,
-        elem: WhatsAppMember,
-        updateExisting: boolean = false,
-        groupId?: string
-    ): Promise<boolean> {
-        const existing = this.localItems.get(identifier);
-        const merged = (updateExisting && existing)
-            ? { ...existing, ...elem }
-            : (existing && !updateExisting ? existing : elem);
-        this.localItems.set(identifier, merged);
+    let exporting = false;
+    const runExport = async () => {
+        if (exporting) return;
+        exporting = true;
+        setStatus('Reading IndexedDB…');
         try {
-            await super.addElem(identifier, elem, updateExisting, groupId);
-        } catch {
-            // IDB is optional cache; ignore quota / origin failures
+            const { group, count } = await exportGroupMembers();
+            setStatus(formatFound(group, count));
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            setStatus(message || 'Export failed');
+            console.error(err);
+        } finally {
+            exporting = false;
         }
-        return true;
-    }
+    };
 
-    async getCount(): Promise<number> {
-        return this.localItems.size;
-    }
-
-    async getAll(): Promise<Map<string, WhatsAppMember>> {
-        return this.localItems;
-    }
-
-    async getElem(identifier: string): Promise<WhatsAppMember | undefined> {
-        return this.localItems.get(identifier);
-    }
-
-    async clear(): Promise<void> {
-        this.localItems.clear();
-        try {
-            await super.clear();
-        } catch {
-            // ignore IDB clear failures
-        }
-    }
-
-    async toCsvData(): Promise<string[][]> {
-        const rows: string[][] = [];
-        rows.push(this.headers);
-        this.localItems.forEach((item) => {
-            try {
-                rows.push(this.itemToRow(item));
-            } catch (err) {
-                console.error(err);
-            }
-        });
-        return rows;
-    }
-}
-
-const memberListStore = new WhatsAppStorage({
-    name: "whatsapp-scraper"
-});
-const counterId = 'scraper-number-tracker'
-const exportName = 'whatsAppExport';
-let logsTracker: HistoryTracker;
-
-async function updateConter(){
-    // Update member tracker counter from in-memory map (never empty IDB)
-    const tracker = document.getElementById(counterId)
-    if(tracker){
-        tracker.textContent = memberListStore.localItems.size.toString()
-    }
-}
-
-const uiWidget = new UIContainer();
-
-function buildCTABtns(){
-    // History Tracker
-    logsTracker = new HistoryTracker({
-        onDelete: async (groupId: string) => {
-            // We dont have cancellable adds for now
-            console.log(`Delete ${groupId}`);
-            await memberListStore.deleteFromGroupId(groupId);
-            await updateConter();
-        },
-        divContainer: uiWidget.history,
-        maxLogs: 4
-    })
-
-    // Button Download
-    const btnDownload = createCta();
-    btnDownload.appendChild(createTextSpan('Download\u00A0'))
-    btnDownload.appendChild(createTextSpan('0', {
-        bold: true,
-        idAttribute: counterId
-    }))
-    btnDownload.appendChild(createTextSpan('\u00A0users'))
-
-    btnDownload.addEventListener('click', async function() {
-        const timestamp = new Date().toISOString()
-        const data = await memberListStore.toCsvData()
-        try{
-            exportToCsvWithBom(`${exportName}-${timestamp}.csv`, data)
-        }catch(err){
-            console.error('Error while generating export');
-            // @ts-ignore
-            console.log(err.stack)
-        }
+    const btnExport = createCta();
+    btnExport.appendChild(createTextSpan('Export'));
+    btnExport.addEventListener('click', () => {
+        void runExport();
     });
+    uiWidget.addCta(btnExport);
 
-    uiWidget.addCta(btnDownload)
+    uiWidget.addCta(createSpacer());
 
-    // Spacer
-    uiWidget.addCta(createSpacer())
-
-    // Button Reinit
-    const btnReinit = createCta();
-    btnReinit.appendChild(createTextSpan('Reset'))
-    btnReinit.addEventListener('click', async function() {
-        await memberListStore.clear();
-        logsTracker.cleanLogs();
-        await updateConter();
+    const btnReset = createCta();
+    btnReset.appendChild(createTextSpan('Reset'));
+    btnReset.addEventListener('click', () => {
+        setStatus(DEFAULT_STATUS);
     });
-    uiWidget.addCta(btnReinit);
+    uiWidget.addCta(btnReset);
 
-    // Draggable
     uiWidget.makeItDraggable();
+    uiWidget.render();
+    setDirLtr(uiWidget);
 
-    // Render
-    uiWidget.render()
-
-    // Keep overlay LTR so it stays usable on RTL WhatsApp Web (Hebrew, Arabic)
-    const widgetAny = uiWidget as any;
-    if (widgetAny.inner && widgetAny.inner.setAttribute) {
-        widgetAny.inner.setAttribute('dir', 'ltr');
-    }
-    if (widgetAny.canva && widgetAny.canva.setAttribute) {
-        widgetAny.canva.setAttribute('dir', 'ltr');
-    }
-
-    // Initial
-    window.setTimeout(()=>{
-        updateConter()
-    }, 1000)
+    void runExport();
 }
 
-let modalObserver: MutationObserver | undefined;
-let modalRescanTimer: number | undefined;
-let modalScrollTimer: number | undefined;
-
-function findScrollableContainer(modal: HTMLElement): HTMLElement | null {
-    const listItem = modal.querySelector<HTMLElement>('[role="listitem"]');
-    if (listItem) {
-        let el: HTMLElement | null = listItem.parentElement;
-        while (el && (modal.contains(el) || el === modal)) {
-            if (el.scrollHeight > el.clientHeight + 4) {
-                return el;
-            }
-            el = el.parentElement;
-        }
-    }
-
-    let best: HTMLElement | null = null;
-    let bestOverflow = 0;
-    const candidates = [modal, ...Array.from(modal.querySelectorAll<HTMLElement>('*'))];
-    for (const el of candidates) {
-        const extra = el.scrollHeight - el.clientHeight;
-        if (extra <= bestOverflow) continue;
-        const style = window.getComputedStyle(el);
-        const oy = style.overflowY;
-        if (oy === 'auto' || oy === 'scroll' || oy === 'overlay' || oy === 'hidden') {
-            best = el;
-            bestOverflow = extra;
-        }
-    }
-    return best;
-}
-
-function stopAutoScroll(completed: boolean = false){
-    if (modalScrollTimer != null) {
-        window.clearInterval(modalScrollTimer);
-        modalScrollTimer = undefined;
-        if (completed && logsTracker) {
-            logsTracker.addHistoryLog({
-                label: "Scroll complete",
-                category: LogCategory.LOG
-            });
-        }
-    }
-}
-
-function startAutoScroll(modalElem: HTMLElement){
-    stopAutoScroll(false);
-
-    let attempts = 0;
-    const tryStart = () => {
-        if (!modalElem.isConnected) return;
-        const scroller = findScrollableContainer(modalElem);
-        if (!scroller) {
-            attempts += 1;
-            if (attempts < 15) {
-                window.setTimeout(tryStart, 400);
-            }
-            return;
-        }
-
-        logsTracker.addHistoryLog({
-            label: "Auto-scroll…",
-            category: LogCategory.LOG
-        });
-
-        const stepPx = 120;
-        const tickMs = 400;
-        const maxRoundTrips = 24;
-        const stagnantRoundTripsToStop = 3;
-        let direction = 1;
-        let lastCount = -1;
-        let stagnantRoundTrips = 0;
-        let completedRoundTrips = 0;
-        let passedBottom = false;
-        let settling = false;
-
-        void memberListStore.getCount().then((c) => {
-            lastCount = c;
-        });
-
-        modalScrollTimer = window.setInterval(() => {
-            if (!modalElem.isConnected || !scroller.isConnected) {
-                stopAutoScroll(false);
-                return;
-            }
-
-            const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-            if (maxScroll < 8) {
-                return;
-            }
-
-            scroller.scrollTop += direction * stepPx;
-
-            const atBottom = scroller.scrollTop >= maxScroll - 2;
-            const atTop = scroller.scrollTop <= 2;
-
-            if (direction === 1 && atBottom) {
-                direction = -1;
-                passedBottom = true;
-            } else if (direction === -1 && atTop && passedBottom) {
-                direction = 1;
-                passedBottom = false;
-                if (settling) return;
-                settling = true;
-                void (async () => {
-                    try {
-                        const count = await memberListStore.getCount();
-                        completedRoundTrips += 1;
-                        if (count === lastCount) {
-                            stagnantRoundTrips += 1;
-                        } else {
-                            lastCount = count;
-                            stagnantRoundTrips = 0;
-                        }
-                        if (
-                            stagnantRoundTrips >= stagnantRoundTripsToStop ||
-                            completedRoundTrips >= maxRoundTrips
-                        ) {
-                            stopAutoScroll(true);
-                        }
-                    } finally {
-                        settling = false;
-                    }
-                })();
-            }
-        }, tickMs);
-    };
-
-    window.setTimeout(tryStart, 300);
-}
-
-function listenModalChanges(){
-    // Restart cleanly if the body observer re-fires while a modal is already open
-    if (modalObserver || modalRescanTimer != null || modalScrollTimer != null) {
-        stopListeningModalChanges();
-    }
-
-    const source = getGroupSourceName();
-
-    const modalElem = findModalElem();
-    if(!modalElem) return;
-
-    // Session-wide dedupe: survives virtualized node recycling (where fresh DOM nodes
-    // re-display already-scraped contacts as the user scrolls back)
-    const scrapedIds = new Set<string>();
-
-    const extractFromListItem = async (listItem: HTMLElement) => {
-        // [data-testid="cell-frame-container"] is optional (WhatsApp has been removing it)
-
-        const titleInfo = getListItemTitle(listItem);
-        if (!titleInfo) return;
-        const titleText = titleInfo.text;
-        if (!titleText) return;
-
-        let profileName = "";
-        let profilePhone = "";
-
-        if (titleText.startsWith('~')) {
-            profileName = cleanName(titleText);
-        } else if (isPhoneNumber(titleText)) {
-            profilePhone = titleText;
-        } else if (looksLikeName(titleText)) {
-            profileName = cleanName(titleText);
-        }
-
-        const candidates = collectCandidates(listItem);
-        for (const candidate of candidates) {
-            if (isPhoneNumber(candidate)) {
-                if (!profilePhone) profilePhone = candidate;
-                continue;
-            }
-            if (candidate.startsWith('~')) {
-                if (!profileName) profileName = cleanName(candidate);
-                continue;
-            }
-            if (!profileName && looksLikeName(candidate) && candidate !== titleText) {
-                const maybeDesc = cleanDescription(candidate);
-                // Prefer leftover letter-strings as name only when title was a phone
-                if (isPhoneNumber(titleText) && maybeDesc) {
-                    profileName = cleanName(candidate);
-                }
-            }
-        }
-
-        // Never put a non-phone string in phoneNumber
-        if (profilePhone && !isPhoneNumber(profilePhone)) {
-            if (!profileName && looksLikeName(profilePhone)) {
-                profileName = cleanName(profilePhone);
-            }
-            profilePhone = "";
-        }
-
-        // Named contacts: WhatsApp hides the number in the row; recover it
-        // from tel:/WID attributes or React fiber contact props.
-        if (!profilePhone) {
-            const hidden = findHiddenPhone(listItem, profileName);
-            if (hidden && isPhoneNumber(hidden)) {
-                profilePhone = hidden;
-            }
-        }
-
-        if (!profileName && !profilePhone) return;
-
-        // Storage key: phone if present, else name. If a name-only row was
-        // already stored, update THAT pk instead of inserting a phone-keyed duplicate.
-        let identifier = profilePhone || profileName;
-        const alreadyByPhone = !!(profilePhone && scrapedIds.has(profilePhone));
-        const alreadyByName = !!(profileName && scrapedIds.has(profileName));
-        if (alreadyByPhone) return;
-        if (alreadyByName && !profilePhone) return;
-        if (profilePhone && profileName) {
-            if (alreadyByName) {
-                identifier = profileName;
-            } else {
-                const existingByName = await memberListStore.getElem(profileName);
-                if (existingByName && !existingByName.phoneNumber) {
-                    identifier = profileName;
-                }
-            }
-        }
-
-        scrapedIds.add(identifier);
-        if (profilePhone) scrapedIds.add(profilePhone);
-        if (profileName) scrapedIds.add(profileName);
-
-        const profileDescription = findSecondaryDescription(
-            listItem,
-            titleInfo.el,
-            profileName,
-            profilePhone
-        );
-
-        const data: WhatsAppMember = {
-            profileId: identifier
-        };
-        if (profilePhone) data.phoneNumber = profilePhone;
-        if (source) data.source = source;
-        if (profileName) data.name = profileName;
-        if (profileDescription) data.description = profileDescription;
-
-        await memberListStore.addElem(identifier, data, true);
-        logsTracker.addHistoryLog({
-            label: `Scraping ${profileName || profilePhone}`,
-            category: LogCategory.LOG
-        });
-        updateConter();
-    };
-
-    const handleNode = (el: HTMLElement) => {
-        let items: HTMLElement[] = [];
-        if (el.getAttribute && el.getAttribute('role') === 'listitem') {
-            items = [el];
-        } else if (el.querySelectorAll) {
-            items = Array.from(el.querySelectorAll<HTMLElement>('[role="listitem"]'));
-        }
-
-        items.forEach(listItem => {
-            // Synchronous guard: key data-scraped by current title so recycled virtualized
-            // nodes re-scrape when their content changes, but same-mutation duplicates are dropped.
-            const titleInfo = getListItemTitle(listItem);
-            const titleText = titleInfo ? titleInfo.text : '';
-            if (!titleText) return;
-            if (listItem.getAttribute('data-scraped') === titleText) return;
-            listItem.setAttribute('data-scraped', titleText);
-
-            window.setTimeout(() => extractFromListItem(listItem), 10);
-        });
-    };
-
-    const callback = (mutationList: MutationRecord[]) => {
-        let rescanModal = false;
-        for (const mutation of mutationList) {
-            if (mutation.type === "childList" && mutation.addedNodes.length > 0) {
-                mutation.addedNodes.forEach(node => {
-                    if (node.nodeType === 1) handleNode(node as HTMLElement);
-                });
-            } else if (mutation.type === "attributes" && mutation.attributeName === "data-scraped") {
-                continue;
-            } else if (mutation.type === "attributes" || mutation.type === "characterData") {
-                // Recycled virtualized rows often keep the same node and only
-                // change title/text — re-scan every current listitem.
-                rescanModal = true;
-            }
-        }
-        if (rescanModal) {
-            handleNode(modalElem as HTMLElement);
-        }
-    };
-
-    // Initial pass for items already rendered when the observer attaches
-    handleNode(modalElem as HTMLElement);
-
-    modalObserver = new MutationObserver(callback);
-    modalObserver.observe(modalElem, {
-        childList: true,
-        attributes: true,
-        characterData: true,
-        subtree: true
-    });
-
-    // Safety net: virtualization can update titles without a childList add
-    modalRescanTimer = window.setInterval(() => {
-        if (!modalElem.isConnected) {
-            stopListeningModalChanges();
-            return;
-        }
-        handleNode(modalElem as HTMLElement);
-    }, 500);
-
-    startAutoScroll(modalElem as HTMLElement);
-}
-
-
-
-function stopListeningModalChanges(){
-    if(modalObserver){
-        modalObserver.disconnect();
-        modalObserver = undefined;
-    }
-    if (modalRescanTimer != null) {
-        window.clearInterval(modalRescanTimer);
-        modalRescanTimer = undefined;
-    }
-    stopAutoScroll(false);
-}
-
-
-function main(): void {
-    buildCTABtns();
-
-
-    logsTracker.addHistoryLog({
-        label: "Wait for modal",
-        category: LogCategory.LOG
-    })
-
-    function bodyCallback(
-        mutationList: MutationRecord[],
-        // observer: MutationObserver
-    ){
-        for (const mutation of mutationList) {
-            // console.log(mutation)
-            if (mutation.type === "childList") {
-                if(mutation.addedNodes.length>0){
-                    mutation.addedNodes.forEach((node)=>{
-                        if (node.nodeType !== 1) return;
-                        const htmlNode = node as HTMLElement
-                        if(nodeIsOrContainsModal(htmlNode)){
-                            window.setTimeout(()=>{
-                                listenModalChanges();
-
-                                logsTracker.addHistoryLog({
-                                    label: "Modal found - Scroll to scrape",
-                                    category: LogCategory.LOG
-                                })
-                            }, 10)
-                        }
-                    })
-                }
-                if(mutation.removedNodes.length>0){
-                    mutation.removedNodes.forEach((node)=>{
-                        if (node.nodeType !== 1) return;
-                        const htmlNode = node as HTMLElement
-                        if(nodeIsOrContainsModal(htmlNode)){
-                            stopListeningModalChanges();
-                            logsTracker.addHistoryLog({
-                                label: "Modal Removed - Scraping Stopped",
-                                category: LogCategory.LOG
-                            })
-                        }
-                    })
-                }
-            }
-        }
-    }
-
-    const bodyConfig = { attributes: true, childList: true, subtree: true };
-    const bodyObserver = new MutationObserver(bodyCallback);
-
-    // Start observing the target node for configured mutations
-    const app = document.getElementById('app');
-    if(app){
-        bodyObserver.observe(app, bodyConfig);
-    }
-}
-
-main();
+buildWidget();

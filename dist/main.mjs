@@ -1,9 +1,3 @@
-var __defProp = Object.defineProperty;
-var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
-var __publicField = (obj, key, value) => {
-  __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
-  return value;
-};
 const instanceOfAny = (object, constructors) => constructors.some((c) => object instanceof c);
 let idbProxyableTypes;
 let cursorAdvanceMethods;
@@ -127,32 +121,6 @@ function wrap(value) {
   return newValue;
 }
 const unwrap = (value) => reverseTransformCache.get(value);
-function openDB(name, version, { blocked, upgrade, blocking, terminated } = {}) {
-  const request = indexedDB.open(name, version);
-  const openPromise = wrap(request);
-  if (upgrade) {
-    request.addEventListener("upgradeneeded", (event) => {
-      upgrade(wrap(request.result), event.oldVersion, event.newVersion, wrap(request.transaction), event);
-    });
-  }
-  if (blocked) {
-    request.addEventListener("blocked", (event) => blocked(
-      // Casting due to https://github.com/microsoft/TypeScript-DOM-lib-generator/pull/1405
-      event.oldVersion,
-      event.newVersion,
-      event
-    ));
-  }
-  openPromise.then((db) => {
-    if (terminated)
-      db.addEventListener("close", () => terminated());
-    if (blocking) {
-      db.addEventListener("versionchange", (event) => blocking(event.oldVersion, event.newVersion, event));
-    }
-  }).catch(() => {
-  });
-  return openPromise;
-}
 const readMethods = ["get", "getKey", "getAll", "getAllKeys", "count"];
 const writeMethods = ["put", "add", "delete", "clear"];
 const cachedMethods = /* @__PURE__ */ new Map();
@@ -237,7 +205,7 @@ replaceTraps((oldTraps) => ({
     return isIteratorProp(target, prop) || oldTraps.has(target, prop);
   }
 }));
-var __awaiter$1 = function(thisArg, _arguments, P, generator) {
+(function(thisArg, _arguments, P, generator) {
   function adopt(value) {
     return value instanceof P ? value : new P(function(resolve) {
       resolve(value);
@@ -263,8 +231,8 @@ var __awaiter$1 = function(thisArg, _arguments, P, generator) {
     }
     step((generator = generator.apply(thisArg, _arguments || [])).next());
   });
-};
-var __rest = function(s, e) {
+});
+(function(s, e) {
   var t = {};
   for (var p in s)
     if (Object.prototype.hasOwnProperty.call(s, p) && e.indexOf(p) < 0)
@@ -275,237 +243,17 @@ var __rest = function(s, e) {
         t[p[i]] = s[p[i]];
     }
   return t;
-};
-class ListStorage {
-  constructor(options) {
-    this.name = "scrape-storage";
-    this.persistent = true;
-    this.data = /* @__PURE__ */ new Map();
-    if (options === null || options === void 0 ? void 0 : options.name)
-      this.name = options.name;
-    if (options === null || options === void 0 ? void 0 : options.persistent)
-      this.persistent = options.persistent;
-    this.initDB().then(() => {
-    }).catch(() => {
-      this.persistent = false;
-    });
-  }
-  get storageKey() {
-    return `storage-${this.name}`;
-  }
-  initDB() {
-    return __awaiter$1(this, void 0, void 0, function* () {
-      this.db = yield openDB(this.storageKey, 6, {
-        upgrade(db, oldVersion, newVersion, transaction) {
-          let dataStore;
-          if (oldVersion < 5) {
-            try {
-              db.deleteObjectStore("data");
-            } catch (err) {
-            }
-          }
-          if (!db.objectStoreNames.contains("data")) {
-            dataStore = db.createObjectStore("data", {
-              keyPath: "_id",
-              autoIncrement: true
-            });
-          } else {
-            dataStore = transaction.objectStore("data");
-          }
-          if (dataStore && !dataStore.indexNames.contains("_createdAt")) {
-            dataStore.createIndex("_createdAt", "_createdAt");
-          }
-          if (dataStore && !dataStore.indexNames.contains("_groupId")) {
-            dataStore.createIndex("_groupId", "_groupId");
-          }
-          if (dataStore && !dataStore.indexNames.contains("_pk")) {
-            dataStore.createIndex("_pk", "_pk", {
-              unique: true
-            });
-          }
-        }
-      });
-    });
-  }
-  _dbGetElem(identifier, tx) {
-    return __awaiter$1(this, void 0, void 0, function* () {
-      if (this.persistent && this.db) {
-        if (!tx) {
-          tx = this.db.transaction("data", "readonly");
-        }
-        const store = tx.store;
-        const existingValue = yield store.index("_pk").get(identifier);
-        return existingValue;
-      } else {
-        throw new Error("DB doesnt exist");
-      }
-    });
-  }
-  getElem(identifier) {
-    return __awaiter$1(this, void 0, void 0, function* () {
-      if (this.persistent && this.db) {
-        try {
-          return yield this._dbGetElem(identifier);
-        } catch (err) {
-          console.error(err);
-        }
-      } else {
-        this.data.get(identifier);
-      }
-    });
-  }
-  _dbSetElem(identifier, elem, updateExisting = false, groupId, tx) {
-    return __awaiter$1(this, void 0, void 0, function* () {
-      if (this.persistent && this.db) {
-        let saved = false;
-        if (!tx) {
-          tx = this.db.transaction("data", "readwrite");
-        }
-        const store = tx.store;
-        const existingValue = yield store.index("_pk").get(identifier);
-        if (existingValue) {
-          if (updateExisting) {
-            yield store.put(Object.assign(Object.assign({}, existingValue), elem));
-            saved = true;
-          }
-        } else {
-          const toStore = Object.assign({ "_pk": identifier, "_createdAt": /* @__PURE__ */ new Date() }, elem);
-          if (groupId) {
-            toStore["_groupId"] = groupId;
-          }
-          yield store.put(toStore);
-          saved = true;
-        }
-        return saved;
-      } else {
-        throw new Error("DB doesnt exist");
-      }
-    });
-  }
-  addElem(identifier, elem, updateExisting = false, groupId) {
-    return __awaiter$1(this, void 0, void 0, function* () {
-      if (this.persistent && this.db) {
-        try {
-          return yield this._dbSetElem(identifier, elem, updateExisting, groupId);
-        } catch (err) {
-          console.error(err);
-        }
-      } else {
-        this.data.set(identifier, elem);
-      }
-      return true;
-    });
-  }
-  addElems(elems, updateExisting = false, groupId) {
-    return __awaiter$1(this, void 0, void 0, function* () {
-      if (this.persistent && this.db) {
-        const createPromises = [];
-        const tx = this.db.transaction("data", "readwrite");
-        const processedIdentifiers = [];
-        elems.forEach(([identifier, elem]) => {
-          if (processedIdentifiers.indexOf(identifier) === -1) {
-            processedIdentifiers.push(identifier);
-            createPromises.push(this._dbSetElem(identifier, elem, updateExisting, groupId, tx));
-          }
-        });
-        if (createPromises.length > 0) {
-          createPromises.push(tx.done);
-          const results = yield Promise.all(createPromises);
-          let counter = 0;
-          results.forEach((result) => {
-            if (typeof result === "boolean" && result) {
-              counter += 1;
-            }
-          });
-          return counter;
-        }
-        return 0;
-      } else {
-        elems.forEach(([identifier, elem]) => {
-          this.addElem(identifier, elem);
-        });
-        return elems.length;
-      }
-    });
-  }
-  deleteFromGroupId(groupId) {
-    return __awaiter$1(this, void 0, void 0, function* () {
-      if (this.persistent && this.db) {
-        let counter = 0;
-        const txWrite = this.db.transaction("data", "readwrite");
-        let cursor = yield txWrite.store.index("_groupId").openCursor(IDBKeyRange.only(groupId));
-        while (cursor) {
-          cursor.delete();
-          cursor = yield cursor.continue();
-          counter += 1;
-        }
-        return counter;
-      } else {
-        throw new Error("Not Implemented Error");
-      }
-    });
-  }
-  clear() {
-    return __awaiter$1(this, void 0, void 0, function* () {
-      if (this.persistent && this.db) {
-        yield this.db.clear("data");
-      } else {
-        this.data.clear();
-      }
-    });
-  }
-  getCount() {
-    return __awaiter$1(this, void 0, void 0, function* () {
-      if (this.persistent && this.db) {
-        return yield this.db.count("data");
-      } else {
-        return this.data.size;
-      }
-    });
-  }
-  getAll() {
-    return __awaiter$1(this, void 0, void 0, function* () {
-      if (this.persistent && this.db) {
-        const data = /* @__PURE__ */ new Map();
-        const dbData = yield this.db.getAll("data");
-        if (dbData) {
-          dbData.forEach((storageItem) => {
-            const { _id } = storageItem, itemData = __rest(storageItem, ["_id"]);
-            data.set(_id, itemData);
-          });
-        }
-        return data;
-      } else {
-        return this.data;
-      }
-    });
-  }
-  toCsvData() {
-    return __awaiter$1(this, void 0, void 0, function* () {
-      const rows = [];
-      rows.push(this.headers);
-      const data = yield this.getAll();
-      data.forEach((item) => {
-        try {
-          rows.push(this.itemToRow(item));
-        } catch (err) {
-          console.error(err);
-        }
-      });
-      return rows;
-    });
-  }
-}
+});
 const btnStyles = [
   "display: block;",
   "padding: 0px 4px;",
   "cursor: pointer;",
   "text-align: center;"
 ];
-function createCta(main2) {
+function createCta(main) {
   const btn = document.createElement("div");
   const styles = [...btnStyles];
-  if (main2) {
+  if (main) {
     styles.push("flex-grow: 1;");
   }
   btn.setAttribute("style", styles.join(""));
@@ -636,7 +384,7 @@ class UIContainer {
     });
   }
 }
-var __awaiter = function(thisArg, _arguments, P, generator) {
+(function(thisArg, _arguments, P, generator) {
   function adopt(value) {
     return value instanceof P ? value : new P(function(resolve) {
       resolve(value);
@@ -662,211 +410,569 @@ var __awaiter = function(thisArg, _arguments, P, generator) {
     }
     step((generator = generator.apply(thisArg, _arguments || [])).next());
   });
-};
+});
 var LogCategory;
 (function(LogCategory2) {
   LogCategory2["ADD"] = "add";
   LogCategory2["LOG"] = "log";
 })(LogCategory || (LogCategory = {}));
-const historyPanelStyles = [
-  "text-align: right;",
-  "background: #f5f5fa;",
-  "padding: 8px;",
-  "margin-bottom: 8px;",
-  "border-radius: 8px;",
-  "font-family: monospace;",
-  "font-size: 16px;",
-  "box-shadow: rgba(42, 35, 66, 0.2) 0 2px 2px,rgba(45, 35, 66, 0.2) 0 7px 13px -4px;",
-  "color: #2f2f2f;"
-];
-const historyUlStyles = [
-  "list-style: none;",
-  "margin: 0;"
-];
-const historyLiStyles = [
-  "line-height: 30px;",
-  "display: flex;",
-  "align-items: center;",
-  "justify-content: right;"
-];
-const deleteIconStyles = [
-  "display: flex;",
-  "align-items: center;",
-  "padding: 4px 12px;",
-  "cursor: pointer;"
-];
-const deleteIconSvg = `<svg stroke="currentColor" fill="none" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" height="16px" width="16px" xmlns="http://www.w3.org/2000/svg"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`;
-class HistoryTracker {
-  constructor({ onDelete, divContainer, maxLogs }) {
-    this.maxLogs = 5;
-    this.logs = [];
-    this.panelRef = null;
-    this.counter = 0;
-    this.onDelete = onDelete;
-    this.container = divContainer;
-    if (maxLogs) {
-      this.maxLogs = maxLogs;
-    }
-  }
-  renderPanel() {
-    const panel = document.createElement("div");
-    panel.setAttribute("style", historyPanelStyles.join(""));
-    return panel;
-  }
-  renderLogs() {
-    if (this.panelRef) {
-      this.panelRef.remove();
-    }
-    if (this.logs.length === 0)
-      return;
-    const listOutter = document.createElement("ul");
-    listOutter.setAttribute("style", historyUlStyles.join(""));
-    this.logs.forEach((log) => {
-      const listElem = document.createElement("li");
-      listElem.setAttribute("style", historyLiStyles.join(""));
-      let logHtml;
-      if (log.category === LogCategory.ADD) {
-        logHtml = `<div>#${log.index} ${log.label} (${log.numberItems})</div>`;
-      } else {
-        logHtml = `<div>#${log.index} ${log.label}</div>`;
-      }
-      listElem.innerHTML = logHtml;
-      if (log.category === LogCategory.ADD && log.cancellable) {
-        const deleteIcon = document.createElement("div");
-        deleteIcon.setAttribute("style", deleteIconStyles.join(""));
-        deleteIcon.innerHTML = deleteIconSvg;
-        deleteIcon.addEventListener("click", () => __awaiter(this, void 0, void 0, function* () {
-          yield this.onDelete(log.groupId);
-          const logIndex = this.logs.findIndex((loopLog) => loopLog.index === log.index);
-          if (logIndex !== -1) {
-            this.logs.splice(logIndex, 1);
-            this.renderLogs();
-          }
-        }));
-        listElem.append(deleteIcon);
-      }
-      listOutter.prepend(listElem);
-    });
-    const panel = this.renderPanel();
-    panel.appendChild(listOutter);
-    this.panelRef = panel;
-    this.container.appendChild(panel);
-  }
-  addHistoryLog(data) {
-    this.counter += 1;
-    let log;
-    if (data.category === LogCategory.ADD) {
-      log = {
-        index: this.counter,
-        label: data.label,
-        groupId: data.groupId,
-        numberItems: data.numberItems,
-        cancellable: data.cancellable,
-        createdAt: /* @__PURE__ */ new Date(),
-        category: LogCategory.ADD
-      };
-    } else if (data.category === LogCategory.LOG) {
-      log = {
-        index: this.counter,
-        label: data.label,
-        createdAt: /* @__PURE__ */ new Date(),
-        category: LogCategory.LOG
-      };
-    } else {
-      console.error("Missing category");
-      return;
-    }
-    this.logs.unshift(log);
-    if (this.logs.length > this.maxLogs) {
-      this.logs.splice(this.maxLogs);
-    }
-    this.renderLogs();
-  }
-  cleanLogs() {
-    this.logs = [];
-    this.counter = 0;
-    this.renderLogs();
-  }
-}
-const BIDI_AND_SPACE = /[\s\-\(\)\.\u00a0\u202f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+const DB_NAME = "model-storage";
+const DEFAULT_STATUS = "Open a group, then Export";
+const EXPORT_PREFIX = "whatsAppExport";
 const BIDI_MARKS = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+const BIDI_AND_SPACE = /[\s\-\(\)\.\u00a0\u202f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+const CHAT_STORE_CANDIDATES = ["chat", "chats"];
+const PARTICIPANT_STORE_CANDIDATES = ["participant", "participants"];
+const CONTACT_STORE_CANDIDATES = ["contact", "contacts"];
+const GROUP_META_STORE_CANDIDATES = [
+  "group-metadata",
+  "groupMetadata",
+  "group_metadata",
+  "group-meta"
+];
 function stripBidi(text) {
   return text.replace(BIDI_MARKS, "");
+}
+function normalizeText(text) {
+  return stripBidi(text).replace(/\s+/g, " ").trim();
 }
 function isPhoneNumber(text) {
   const stripped = text.replace(BIDI_AND_SPACE, "");
   return /^\+?\d{6,15}$/.test(stripped);
 }
-function cleanName(name) {
-  return name.trim().replace(/^~\s*/u, "").replace(BIDI_MARKS, "").trim();
-}
-function looksLikeName(text) {
-  const t = stripBidi(text).trim();
-  if (!t)
-    return false;
-  if (t.startsWith("~"))
-    return true;
-  return /[\p{L}]/u.test(t);
-}
-function cleanDescription(description) {
-  const descriptionClean = stripBidi(description).trim();
-  if (!descriptionClean)
+function asRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
     return null;
-  const latinPlaceholders = [
-    /^loading(\s+about)?(\.{0,3})?$/i,
-    /^(hey there!?\s*)?i am using whatsapp\.?$/i,
-    /^available$/i,
-    /^cargando(\s+\w+)?(\.{0,3})?$/i,
-    /^(¡?hola!?\s*)?estoy usando whatsapp\.?$/i,
-    /^disponible$/i,
-    /^carregando(\s+\w+)?(\.{0,3})?$/i,
-    /^(oi,?\s*(eu\s+)?)?estou usando o?\s*whatsapp\.?$/i,
-    /^disponível$/i,
-    /^chargement(\b.*)?(\.{0,3})?$/i,
-    /^(salut\s*!?\s*)?j['’]utilise whatsapp\.?$/i,
-    /^disponible$/i,
-    /^wird geladen(\.{0,3})?$/i,
-    /^(hallo!?\s*)?ich benutze whatsapp\.?$/i,
-    /^verfügbar$/i,
-    /^caricamento(\.{0,3})?$/i,
-    /^(ciao!?\s*)?sto usando whatsapp\.?$/i,
-    /^disponibile$/i,
-    /^(привет!?\s*)?я использую whatsapp\.?$/i,
-    /^доступен$/i,
-    /^(merhaba!?\s*)?whatsapp kullan(ıyorum|iyorum)\.?$/i,
-    /^müsait$/i,
-    /^(halo!?\s*)?saya menggunakan whatsapp\.?$/i,
-    /^(嗨[！!]?\s*)?我正在使用 whatsapp$/
-  ];
-  for (const re of latinPlaceholders) {
-    if (re.test(descriptionClean))
-      return null;
+  return value;
+}
+function asArray(value) {
+  if (Array.isArray(value))
+    return value;
+  const rec = asRecord(value);
+  if (!rec)
+    return [];
+  if (Array.isArray(rec._models))
+    return rec._models;
+  if (Array.isArray(rec.models))
+    return rec.models;
+  if (Array.isArray(rec.toArray))
+    return rec.toArray;
+  return [];
+}
+function serializeId(value) {
+  if (value == null)
+    return "";
+  if (typeof value === "string" || typeof value === "number") {
+    return String(value);
   }
-  const rtlPlaceholders = [
-    /^טוען(\s+.*)?$/,
-    /^(היי[!,]?\s*)?אני משתמש(ת)? ב-?WhatsApp$/,
-    /^זמינ[הן]$/,
-    /^جاري التحميل/,
-    /^(مرحبا!?\s*)?أنا أستخدم (واتساب|WhatsApp)$/,
-    /^متاح$/,
-    /^Я использую WhatsApp$/,
-    /^Доступен$/,
-    /^我正在使用 WhatsApp$/
-  ];
-  for (const re of rtlPlaceholders) {
-    if (re.test(descriptionClean))
-      return null;
+  const rec = asRecord(value);
+  if (!rec)
+    return "";
+  if (typeof rec._serialized === "string")
+    return rec._serialized;
+  if (typeof rec.id === "string")
+    return rec.id;
+  if (rec.user != null && rec.server != null) {
+    return `${rec.user}@${rec.server}`;
   }
-  return descriptionClean;
+  if (typeof rec.wid === "string")
+    return rec.wid;
+  if (rec.wid)
+    return serializeId(rec.wid);
+  return "";
+}
+function userPart(wid) {
+  const s = normalizeText(wid);
+  const at = s.indexOf("@");
+  return at >= 0 ? s.slice(0, at) : s;
+}
+function serverPart(wid) {
+  const s = normalizeText(wid);
+  const at = s.indexOf("@");
+  return at >= 0 ? s.slice(at + 1) : "";
+}
+function idsEqual(a, b) {
+  const na = normalizeText(a);
+  const nb = normalizeText(b);
+  if (!na || !nb)
+    return false;
+  if (na === nb)
+    return true;
+  const ua = userPart(na);
+  const ub = userPart(nb);
+  const sa = serverPart(na);
+  const sb = serverPart(nb);
+  return !!ua && ua === ub && !!sa && sa === sb;
+}
+function pickStoreName(db, candidates) {
+  const names = Array.from(db.objectStoreNames);
+  for (const wanted of candidates) {
+    if (names.includes(wanted))
+      return wanted;
+  }
+  const lower = names.map((n) => n.toLowerCase());
+  for (const wanted of candidates) {
+    const w = wanted.toLowerCase();
+    const exact = lower.indexOf(w);
+    if (exact >= 0)
+      return names[exact];
+    const idx = lower.findIndex((n) => n.includes(w) || w.includes(n));
+    if (idx >= 0)
+      return names[idx];
+  }
+  return null;
+}
+function openModelStorage() {
+  return new Promise((resolve, reject) => {
+    let req;
+    try {
+      req = indexedDB.open(DB_NAME);
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    req.onerror = () => {
+      reject(req.error || new Error("Failed to open IndexedDB model-storage"));
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onupgradeneeded = (ev) => {
+      var _a;
+      if (ev.oldVersion === 0) {
+        try {
+          (_a = req.transaction) == null ? void 0 : _a.abort();
+        } catch {
+        }
+        reject(new Error("WhatsApp model-storage is missing. Open https://web.whatsapp.com first."));
+      }
+    };
+  });
+}
+function getAllFromStore(db, storeName) {
+  return new Promise((resolve, reject) => {
+    try {
+      const tx = db.transaction(storeName, "readonly");
+      const req = tx.objectStore(storeName).getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error || new Error(`Failed to read store ${storeName}`));
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+async function readStore(db, candidates) {
+  const name = pickStoreName(db, candidates);
+  if (!name)
+    return [];
+  try {
+    return await getAllFromStore(db, name);
+  } catch {
+    return [];
+  }
+}
+function getVisibleGroupTitle() {
+  const selectors = [
+    '#main header span[dir="auto"][title]',
+    "#main header span[title]",
+    '#main header span[dir="auto"]',
+    'header span[dir="auto"][title]',
+    "header span[title]",
+    'header span[dir="auto"]'
+  ];
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (!el)
+      continue;
+    const raw = el.getAttribute("title") || el.textContent || "";
+    const t = normalizeText(raw);
+    if (t)
+      return t;
+  }
+  const styled = document.querySelectorAll("header span[style*='height']:not(.copyable-text)");
+  if (styled.length === 1 && styled[0].textContent) {
+    const t = normalizeText(styled[0].textContent);
+    if (t)
+      return t;
+  }
+  return null;
+}
+function chatWid(chat) {
+  return serializeId(chat.id) || serializeId(chat._id) || "";
+}
+function isGroupChat(chat) {
+  const id = chatWid(chat);
+  if (id.endsWith("@g.us"))
+    return true;
+  if (chat.isGroup === true)
+    return true;
+  if (chat.kind === "group")
+    return true;
+  return false;
+}
+function chatDisplayName(chat) {
+  const fields = [chat.name, chat.formattedTitle, chat.subject, chat.displayedTitle];
+  for (const f of fields) {
+    if (typeof f === "string" && normalizeText(f))
+      return normalizeText(f);
+  }
+  return "";
+}
+function chatTimestamp(chat) {
+  const fields = [
+    chat.t,
+    chat.timestamp,
+    chat.lastMessageRecvTimestamp,
+    chat.msgTimestamp,
+    chat.conversationTimestamp
+  ];
+  for (const f of fields) {
+    const n = Number(f);
+    if (Number.isFinite(n) && n > 0)
+      return n;
+  }
+  return 0;
+}
+function titleScore(header, name) {
+  const h = normalizeText(header);
+  const n = normalizeText(name);
+  if (!h || !n)
+    return 0;
+  if (h === n)
+    return 1e3 + n.length;
+  if (n.includes(h) || h.includes(n))
+    return 100 + Math.min(h.length, n.length);
+  return 0;
+}
+function metaSubject(meta) {
+  const fields = [meta.subject, meta.name, meta.formattedTitle];
+  for (const f of fields) {
+    if (typeof f === "string" && normalizeText(f))
+      return normalizeText(f);
+  }
+  return "";
+}
+function metaWid(meta) {
+  return serializeId(meta.id) || serializeId(meta._id) || serializeId(meta.groupId) || "";
+}
+function resolveGroup(chats, metas, headerTitle) {
+  const groups = chats.filter(isGroupChat);
+  const metaById = /* @__PURE__ */ new Map();
+  for (const meta of metas) {
+    const id = metaWid(meta);
+    if (id)
+      metaById.set(id, meta);
+  }
+  const enriched = groups.map((chat) => {
+    const id = chatWid(chat);
+    const meta = metaById.get(id);
+    const name = chatDisplayName(chat) || (meta ? metaSubject(meta) : "");
+    return { id, name, t: chatTimestamp(chat), chat };
+  }).filter((g) => g.id);
+  if (enriched.length === 0) {
+    const fromMeta = metas.map((meta) => ({
+      id: metaWid(meta),
+      name: metaSubject(meta),
+      t: Number(meta.t || meta.creation || 0) || 0
+    })).filter((g) => g.id.endsWith("@g.us") || g.id);
+    if (fromMeta.length === 0)
+      return null;
+    return pickBest(fromMeta, headerTitle);
+  }
+  return pickBest(enriched, headerTitle);
+}
+function pickBest(groups, headerTitle) {
+  if (groups.length === 0)
+    return null;
+  if (headerTitle) {
+    let best = null;
+    for (const g of groups) {
+      const score = titleScore(headerTitle, g.name);
+      if (score <= 0)
+        continue;
+      if (!best || score > best.score || score === best.score && g.t > best.t) {
+        best = { ...g, score };
+      }
+    }
+    if (best) {
+      return { id: best.id, name: best.name || headerTitle, usedFallback: false, fallbackReason: "" };
+    }
+  }
+  const withTs = groups.filter((g) => g.t > 0).sort((a, b) => b.t - a.t);
+  const chosen = withTs[0] || groups[0];
+  const reason = headerTitle ? "no header match; used most recently active group" : withTs[0] ? "used most recently active group" : "used first group chat";
+  return {
+    id: chosen.id,
+    name: chosen.name || chosen.id,
+    usedFallback: true,
+    fallbackReason: reason
+  };
+}
+function extractParticipant(value) {
+  if (typeof value === "string" || typeof value === "number") {
+    const id2 = String(value);
+    return id2 ? { id: id2 } : null;
+  }
+  const rec = asRecord(value);
+  if (!rec)
+    return null;
+  const id = serializeId(rec.id) || serializeId(rec.wid) || serializeId(rec.jid) || serializeId(rec.participant) || (typeof rec.user === "string" && typeof rec.server === "string" ? `${rec.user}@${rec.server}` : "");
+  if (!id)
+    return null;
+  const nameFields = [rec.name, rec.pushname, rec.verifiedName, rec.shortName];
+  let name = "";
+  for (const f of nameFields) {
+    if (typeof f === "string" && normalizeText(f)) {
+      name = normalizeText(f);
+      break;
+    }
+  }
+  return {
+    id,
+    isAdmin: !!(rec.isAdmin || rec.isSuperAdmin),
+    name: name || void 0
+  };
+}
+function flattenParticipants(value) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  const add = (p) => {
+    if (!p || !p.id || seen.has(p.id))
+      return;
+    seen.add(p.id);
+    out.push(p);
+  };
+  if (typeof value === "string" || typeof value === "number") {
+    add(extractParticipant(value));
+    return out;
+  }
+  const arr = asArray(value);
+  if (arr.length > 0) {
+    for (const item of arr)
+      add(extractParticipant(item));
+    return out;
+  }
+  const rec = asRecord(value);
+  if (!rec)
+    return out;
+  if (rec.participants != null) {
+    return flattenParticipants(rec.participants);
+  }
+  add(extractParticipant(rec));
+  return out;
+}
+function collectParticipants(groupId, chats, participantRows, metas) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  const addAll = (items) => {
+    for (const p of items) {
+      if (!p.id || seen.has(p.id))
+        continue;
+      seen.add(p.id);
+      out.push(p);
+    }
+  };
+  for (const row of participantRows) {
+    const rowGroup = serializeId(row.groupId) || (serializeId(row.id).endsWith("@g.us") ? serializeId(row.id) : "");
+    if (rowGroup && idsEqual(rowGroup, groupId)) {
+      if (row.participants != null) {
+        addAll(flattenParticipants(row.participants));
+      } else {
+        const one = extractParticipant(row);
+        if (one && !idsEqual(one.id, groupId))
+          addAll([one]);
+      }
+      continue;
+    }
+    if (idsEqual(serializeId(row.id), groupId) && row.participants != null) {
+      addAll(flattenParticipants(row.participants));
+    }
+  }
+  for (const chat of chats) {
+    if (!idsEqual(chatWid(chat), groupId))
+      continue;
+    if (chat.participants != null)
+      addAll(flattenParticipants(chat.participants));
+    if (chat.groupMetadata != null) {
+      const gm = asRecord(chat.groupMetadata);
+      if (gm && gm.participants != null)
+        addAll(flattenParticipants(gm.participants));
+    }
+  }
+  for (const meta of metas) {
+    if (!idsEqual(metaWid(meta), groupId))
+      continue;
+    if (meta.participants != null)
+      addAll(flattenParticipants(meta.participants));
+    if (meta.participantsList != null)
+      addAll(flattenParticipants(meta.participantsList));
+  }
+  return out;
+}
+function contactKeys(contact) {
+  const keys = [];
+  const add = (v) => {
+    const s = serializeId(v);
+    if (!s)
+      return;
+    keys.push(s);
+    const u = userPart(s);
+    if (u)
+      keys.push(u);
+  };
+  add(contact.id);
+  add(contact._id);
+  add(contact.wid);
+  add(contact.jid);
+  add(contact.phoneNumber);
+  add(contact.lid);
+  add(contact.lidJid);
+  add(contact.pnJid);
+  if (typeof contact.user === "string")
+    keys.push(contact.user);
+  return keys;
+}
+function buildContactIndex(contacts) {
+  const index = /* @__PURE__ */ new Map();
+  for (const contact of contacts) {
+    for (const key of contactKeys(contact)) {
+      const existing = index.get(key);
+      if (!existing) {
+        index.set(key, contact);
+      } else {
+        const existingPhone = serializeId(existing.phoneNumber);
+        const nextPhone = serializeId(contact.phoneNumber);
+        const existingName = typeof existing.name === "string" ? existing.name : "";
+        const nextName = typeof contact.name === "string" ? contact.name : "";
+        if (!existingPhone && nextPhone || !existingName && nextName) {
+          index.set(key, { ...existing, ...contact });
+        }
+      }
+    }
+  }
+  return index;
+}
+function lookupContact(index, participantId) {
+  const id = normalizeText(participantId);
+  if (!id)
+    return void 0;
+  return index.get(id) || index.get(userPart(id));
+}
+function plusFromContact(contact) {
+  if (!contact)
+    return false;
+  const fields = [contact.phoneNumber, contact.e164, contact.number, contact.formattedPhone];
+  for (const f of fields) {
+    if (typeof f === "string" && f.includes("+"))
+      return true;
+  }
+  return false;
+}
+function digitsFromCus(wid) {
+  const user = userPart(wid);
+  const cleaned = user.replace(BIDI_AND_SPACE, "");
+  if (/^\+?\d{6,15}$/.test(cleaned)) {
+    return cleaned.replace(/^\+/, "");
+  }
+  const only = user.replace(/\D/g, "");
+  return only.length >= 6 && only.length <= 15 ? only : "";
+}
+function phoneFromContactField(value) {
+  const s = serializeId(value);
+  if (!s)
+    return "";
+  if (s.endsWith("@c.us"))
+    return digitsFromCus(s);
+  if (s.endsWith("@lid") || s.endsWith("@g.us") || s.endsWith("@s.whatsapp.net"))
+    return "";
+  if (isPhoneNumber(s))
+    return s.replace(BIDI_AND_SPACE, "").replace(/^\+/, "");
+  return "";
+}
+function resolvePhone(participantId, contact) {
+  const id = normalizeText(participantId);
+  let phone = "";
+  if (id.endsWith("@c.us")) {
+    phone = digitsFromCus(id);
+  } else if (id.endsWith("@lid")) {
+    if (contact) {
+      phone = phoneFromContactField(contact.phoneNumber) || phoneFromContactField(contact.id) || phoneFromContactField(contact.pnJid) || phoneFromContactField(contact.e164);
+      const pn = serializeId(contact.phoneNumber);
+      const cid = serializeId(contact.id);
+      if (!pn.endsWith("@c.us") && !cid.endsWith("@c.us") && !serializeId(contact.pnJid).endsWith("@c.us")) {
+        if (!phoneFromContactField(contact.phoneNumber) && !phoneFromContactField(contact.e164)) {
+          phone = "";
+        }
+      }
+    }
+  } else {
+    phone = digitsFromCus(id) || phoneFromContactField(id);
+  }
+  if (!phone && contact) {
+    phone = phoneFromContactField(contact.phoneNumber) || (serializeId(contact.id).endsWith("@c.us") ? digitsFromCus(serializeId(contact.id)) : "");
+  }
+  if (!phone)
+    return "";
+  if (plusFromContact(contact))
+    return `+${phone.replace(/^\+/, "")}`;
+  return phone.replace(/^\+/, "");
+}
+function contactName(contact, fallback) {
+  if (contact) {
+    const fields = [contact.name, contact.pushname, contact.verifiedName, contact.shortName];
+    for (const f of fields) {
+      if (typeof f === "string" && normalizeText(f))
+        return normalizeText(f);
+    }
+  }
+  return fallback ? normalizeText(fallback) : "";
+}
+function contactPushname(contact) {
+  if (contact && typeof contact.pushname === "string") {
+    return normalizeText(contact.pushname);
+  }
+  return "";
+}
+function joinMembers(participants, contacts, source) {
+  const index = buildContactIndex(contacts);
+  const rows = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const p of participants) {
+    const contact = lookupContact(index, p.id);
+    const phone = resolvePhone(p.id, contact);
+    const name = contactName(contact, p.name);
+    const pushname = contactPushname(contact);
+    const id = normalizeText(p.id);
+    const key = phone || id;
+    if (!key || seen.has(key)) {
+      if (phone && id && seen.has(id)) {
+        const existing = rows.find((r) => r.id === id && !r.phoneNumber);
+        if (existing) {
+          existing.phoneNumber = phone;
+          seen.add(phone);
+        }
+      }
+      continue;
+    }
+    seen.add(key);
+    if (phone)
+      seen.add(phone);
+    if (id)
+      seen.add(id);
+    rows.push({
+      phoneNumber: phone,
+      name,
+      pushname,
+      source,
+      id,
+      isAdmin: p.isAdmin
+    });
+  }
+  return rows;
 }
 function rowToCsvLine(row) {
   let line = "";
   for (let i = 0; i < row.length; i++) {
     const cell = row[i];
     let value = cell === null || cell === void 0 ? "" : cell.toString();
-    if (cell instanceof Date) {
-      value = cell.toLocaleString();
-    }
     value = value.replace(/"/g, '""');
     if (value.search(/("|,|\n)/g) >= 0) {
       value = '"' + value + '"';
@@ -891,816 +997,117 @@ function exportToCsvWithBom(filename, rows) {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   }
 }
-function findModalElem(root = document) {
-  const animate = root.querySelector('[data-animate-modal-body="true"]');
-  if (animate)
-    return animate;
-  const dialogs = root.querySelectorAll('div[role="dialog"]');
-  for (const dialog of Array.from(dialogs)) {
-    if (dialog.querySelector('[role="listitem"]')) {
-      return dialog;
-    }
+function membersToCsv(rows) {
+  const out = [
+    ["Phone Number", "Name", "Pushname", "Source", "Id"]
+  ];
+  for (const row of rows) {
+    out.push([
+      row.phoneNumber,
+      row.name,
+      row.pushname,
+      row.source,
+      row.id
+    ]);
   }
-  if (dialogs.length === 1)
-    return dialogs[0];
-  return null;
-}
-function nodeIsOrContainsModal(htmlNode) {
-  if (!htmlNode || htmlNode.nodeType !== 1)
-    return false;
-  const matches = typeof htmlNode.matches === "function" ? htmlNode.matches.bind(htmlNode) : () => false;
-  if (matches('[data-animate-modal-body="true"]'))
-    return true;
-  if (matches('div[role="dialog"]'))
-    return true;
-  if (typeof htmlNode.querySelector !== "function")
-    return false;
-  if (htmlNode.querySelector('[data-animate-modal-body="true"]'))
-    return true;
-  if (htmlNode.querySelector('div[role="dialog"]'))
-    return true;
-  return false;
-}
-function getGroupSourceName() {
-  const groupNameNode = document.querySelectorAll("header span[style*='height']:not(.copyable-text)");
-  if (groupNameNode.length === 1 && groupNameNode[0].textContent) {
-    return stripBidi(groupNameNode[0].textContent).trim() || null;
-  }
-  const dirAuto = document.querySelector('header span[dir="auto"][title]');
-  if (dirAuto) {
-    const t = dirAuto.getAttribute("title") || dirAuto.textContent;
-    if (t && t.trim())
-      return stripBidi(t).trim();
-  }
-  const titleSpan = document.querySelector("header span[title]");
-  if (titleSpan) {
-    const t = titleSpan.getAttribute("title") || titleSpan.textContent;
-    if (t && t.trim())
-      return stripBidi(t).trim();
-  }
-  return null;
-}
-function getListItemTitle(listItem) {
-  const titleSpan = listItem.querySelector('[data-testid="cell-frame-title"] span[title]') || listItem.querySelector("span[title]") || listItem.querySelector('span[dir="auto"]');
-  if (!titleSpan)
-    return null;
-  const text = stripBidi(titleSpan.getAttribute("title") || titleSpan.textContent || "").trim();
-  if (!text)
-    return null;
-  return { text, el: titleSpan };
-}
-function collectCandidates(listItem) {
-  const seen = /* @__PURE__ */ new Set();
-  const out = [];
-  const add = (s) => {
-    const v = stripBidi(s || "").trim();
-    if (!v || seen.has(v))
-      return;
-    seen.add(v);
-    out.push(v);
-  };
-  listItem.querySelectorAll("span[title]").forEach((el) => {
-    add(el.getAttribute("title"));
-    add(el.textContent);
-  });
-  listItem.querySelectorAll('span[dir="auto"]').forEach((el) => {
-    add(el.getAttribute("title"));
-    add(el.textContent);
-  });
-  listItem.querySelectorAll('[role="gridcell"]').forEach((el) => {
-    add(el.textContent);
-  });
   return out;
 }
-function normalizeFoundPhone(text) {
-  const cleaned = stripBidi(text).replace(BIDI_AND_SPACE, "");
-  return isPhoneNumber(cleaned) ? cleaned : "";
-}
-const WID_CUS_RE = /(\d{6,15})@c\.us/;
-const WID_NON_PHONE_RE = /@(lid|g\.us|s\.whatsapp\.net|broadcast)\b/;
-function phoneFromWidText(text) {
-  if (!text)
-    return "";
-  const stripped = stripBidi(text);
-  if (WID_NON_PHONE_RE.test(stripped) && !WID_CUS_RE.test(stripped))
-    return "";
-  const m = stripped.match(WID_CUS_RE);
-  return m ? m[1] : "";
-}
-function phoneFromWidObject(obj) {
-  const server = obj.server;
-  if (server === "lid" || server === "g.us" || server === "s.whatsapp.net" || server === "broadcast") {
-    return "";
-  }
-  if (typeof obj._serialized === "string") {
-    const fromSer = phoneFromWidText(obj._serialized);
-    if (fromSer)
-      return fromSer;
-  }
-  if (server === "c.us" && obj.user != null) {
-    const fromUser = normalizeFoundPhone(String(obj.user));
-    if (fromUser)
-      return fromUser;
-  }
-  return "";
-}
-const PHONE_FIELD_NAMES = /* @__PURE__ */ new Set(["phonenumber", "phone", "e164", "number"]);
-function phoneFromNamedField(key, value) {
-  if (!PHONE_FIELD_NAMES.has(key.toLowerCase()))
-    return "";
-  if (typeof value === "string" || typeof value === "number") {
-    return normalizeFoundPhone(String(value));
-  }
-  return "";
-}
-function scanAttrsAndTextForPhone(listItem) {
-  const telLink = listItem.querySelector('a[href^="tel:"]');
-  if (telLink) {
-    const href = telLink.getAttribute("href") || "";
-    const fromTel = normalizeFoundPhone(href.replace(/^tel:/i, ""));
-    if (fromTel)
-      return fromTel;
-  }
-  const nodes = [listItem, ...Array.from(listItem.querySelectorAll("*"))];
-  for (const node of nodes) {
-    if (!(node instanceof HTMLElement))
-      continue;
-    for (const attr of Array.from(node.attributes)) {
-      const val = attr.value || "";
-      const fromWid = phoneFromWidText(val);
-      if (fromWid)
-        return fromWid;
-    }
-  }
-  const namedAttrs = ["data-id", "data-testid", "href", "aria-label", "title", "alt"];
-  const consider = (el) => {
-    if (!el || !(el instanceof HTMLElement))
-      return "";
-    for (const name of namedAttrs) {
-      const val = el.getAttribute(name);
-      if (!val)
-        continue;
-      const fromWid = phoneFromWidText(val);
-      if (fromWid)
-        return fromWid;
-      if (name !== "data-testid") {
-        const fromPhone = normalizeFoundPhone(val);
-        if (fromPhone)
-          return fromPhone;
-      }
-    }
-    return "";
-  };
-  for (const node of nodes) {
-    const direct = consider(node);
-    if (direct)
-      return direct;
-    if (node.hasAttribute("data-testid")) {
-      const parent = node.parentElement;
-      if (parent) {
-        for (const sib of Array.from(parent.children)) {
-          const fromSib = consider(sib);
-          if (fromSib)
-            return fromSib;
-        }
-      }
-    }
-  }
-  const fromText = phoneFromWidText(listItem.textContent || "");
-  if (fromText)
-    return fromText;
-  return "";
-}
-function readReactRoots(el) {
-  const roots = [];
+async function exportGroupMembers() {
+  const db = await openModelStorage();
   try {
-    const rec = el;
-    for (const key of Object.keys(rec)) {
-      if (key.startsWith("__reactFiber") || key.startsWith("__reactProps") || key.startsWith("__reactInternalInstance")) {
-        roots.push(rec[key]);
-      }
+    const [chatRows, participantRows, contactRows, metaRows] = await Promise.all([
+      readStore(db, CHAT_STORE_CANDIDATES),
+      readStore(db, PARTICIPANT_STORE_CANDIDATES),
+      readStore(db, CONTACT_STORE_CANDIDATES),
+      readStore(db, GROUP_META_STORE_CANDIDATES)
+    ]);
+    const chats = chatRows.map(asRecord).filter((r) => !!r);
+    const participantsStore = participantRows.map(asRecord).filter((r) => !!r);
+    const contacts = contactRows.map(asRecord).filter((r) => !!r);
+    const metas = metaRows.map(asRecord).filter((r) => !!r);
+    const headerTitle = getVisibleGroupTitle();
+    const group = resolveGroup(chats, metas, headerTitle);
+    if (!group) {
+      throw new Error("No group chat found in model-storage. Open a group on WhatsApp Web, then Export.");
     }
-  } catch {
-  }
-  return roots;
-}
-const FIBER_SKIP_KEYS = /* @__PURE__ */ new Set([
-  "sibling",
-  "return",
-  "alternate",
-  "_debugOwner",
-  "_debugSource",
-  "_debugNeedsRemount",
-  "_debugHookTypes",
-  "parentNode",
-  "parentElement",
-  "ownerDocument",
-  "nextSibling",
-  "previousSibling"
-]);
-function walkReactForPhone(value, depth, seen, nameHint, requireName, nameSeen = false) {
-  if (value == null || depth > 10)
-    return "";
-  if (typeof value === "string") {
-    if (requireName && !nameSeen)
-      return "";
-    return phoneFromWidText(value);
-  }
-  if (typeof value !== "object")
-    return "";
-  if (value instanceof Node || value instanceof Window)
-    return "";
-  if (seen.has(value))
-    return "";
-  seen.add(value);
-  const rec = value;
-  const nameHere = !requireName || nameSeen || objectMentionsName(rec, nameHint, 1);
-  const fromWidObj = phoneFromWidObject(rec);
-  if (fromWidObj && nameHere)
-    return fromWidObj;
-  try {
-    for (const key of Object.keys(rec)) {
-      const fromField = phoneFromNamedField(key, rec[key]);
-      if (fromField && nameHere)
-        return fromField;
-    }
-  } catch {
-    return "";
-  }
-  try {
-    for (const key of Object.keys(rec)) {
-      if (FIBER_SKIP_KEYS.has(key))
-        continue;
-      const found = walkReactForPhone(
-        rec[key],
-        depth + 1,
-        seen,
-        nameHint,
-        requireName,
-        nameHere
-      );
-      if (found)
-        return found;
-    }
-  } catch {
-    return "";
-  }
-  return "";
-}
-function objectMentionsName(obj, nameHint, extraDepth = 0) {
-  if (!nameHint)
-    return false;
-  const needle = nameHint.trim();
-  if (!needle)
-    return false;
-  try {
-    for (const key of Object.keys(obj)) {
-      const val = obj[key];
-      if (typeof val === "string" && stripBidi(val).includes(needle))
-        return true;
-      if (extraDepth > 0 && val && typeof val === "object" && !(val instanceof Node) && objectMentionsName(val, nameHint, extraDepth - 1)) {
-        return true;
-      }
-    }
-  } catch {
-    return false;
-  }
-  return false;
-}
-function collectFiberHostNodes(listItem) {
-  const nodes = [listItem];
-  const children = listItem.querySelectorAll("*");
-  const childLimit = Math.min(children.length, 24);
-  for (let i = 0; i < childLimit; i++) {
-    const child = children[i];
-    if (child instanceof HTMLElement)
-      nodes.push(child);
-  }
-  let ancestor = listItem.parentElement;
-  for (let i = 0; i < 2 && ancestor; i++) {
-    nodes.push(ancestor);
-    ancestor = ancestor.parentElement;
-  }
-  return nodes;
-}
-function scanReactForPhone(listItem, nameHint) {
-  const hosts = collectFiberHostNodes(listItem);
-  const seen = /* @__PURE__ */ new Set();
-  const ownHosts = hosts.filter((el) => el === listItem || listItem.contains(el));
-  for (const host of ownHosts) {
-    for (const root of readReactRoots(host)) {
-      const found = walkReactForPhone(root, 0, seen, nameHint, false);
-      if (found)
-        return found;
-    }
-  }
-  const ancestorHosts = hosts.filter((el) => el !== listItem && !listItem.contains(el));
-  for (const host of ancestorHosts) {
-    for (const root of readReactRoots(host)) {
-      const found = walkReactForPhone(root, 0, seen, nameHint, !!nameHint);
-      if (found)
-        return found;
-    }
-  }
-  return "";
-}
-function findHiddenPhone(listItem, nameHint) {
-  const fromAttrs = scanAttrsAndTextForPhone(listItem);
-  if (fromAttrs)
-    return fromAttrs;
-  const fromFiber = scanReactForPhone(listItem, nameHint);
-  if (fromFiber)
-    return fromFiber;
-  return "";
-}
-function findSecondaryDescription(listItem, titleEl, name, phone) {
-  const dedicated = listItem.querySelector(
-    '[data-testid="cell-frame-secondary"] [data-testid="selectable-text"]'
-  );
-  if (dedicated && dedicated.textContent) {
-    const desc = cleanDescription(dedicated.textContent);
-    if (desc && desc !== name && desc !== phone)
-      return desc;
-  }
-  const dirAutos = Array.from(listItem.querySelectorAll('span[dir="auto"]'));
-  for (const el of dirAutos) {
-    if (titleEl && (el === titleEl || titleEl.contains(el) || el.contains(titleEl)))
-      continue;
-    if (el.closest('[data-testid="cell-frame-title"]'))
-      continue;
-    const text = stripBidi(el.getAttribute("title") || el.textContent || "").trim();
-    if (!text)
-      continue;
-    if (isPhoneNumber(text))
-      continue;
-    if (name && (text === name || cleanName(text) === name))
-      continue;
-    const desc = cleanDescription(text);
-    if (desc && desc !== name && desc !== phone)
-      return desc;
-  }
-  return "";
-}
-class WhatsAppStorage extends ListStorage {
-  constructor() {
-    super(...arguments);
-    // In-memory source of truth. ListStorage IDB is optional cache only:
-    // once IDB opens, parent getCount/getAll/toCsvData ignore this.data,
-    // and a failed IDB put still returns true (so the history log fires
-    // while Download stays at 0). persistent:false is also ignored unless truthy.
-    __publicField(this, "localItems", /* @__PURE__ */ new Map());
-  }
-  get headers() {
-    return [
-      "Phone Number",
-      "Name",
-      "Description",
-      "Source"
-    ];
-  }
-  itemToRow(item) {
-    return [
-      item.phoneNumber ? item.phoneNumber : "",
-      item.name ? item.name : "",
-      item.description ? item.description : "",
-      item.source ? item.source : ""
-    ];
-  }
-  async addElem(identifier, elem, updateExisting = false, groupId) {
-    const existing = this.localItems.get(identifier);
-    const merged = updateExisting && existing ? { ...existing, ...elem } : existing && !updateExisting ? existing : elem;
-    this.localItems.set(identifier, merged);
-    try {
-      await super.addElem(identifier, elem, updateExisting, groupId);
-    } catch {
-    }
-    return true;
-  }
-  async getCount() {
-    return this.localItems.size;
-  }
-  async getAll() {
-    return this.localItems;
-  }
-  async getElem(identifier) {
-    return this.localItems.get(identifier);
-  }
-  async clear() {
-    this.localItems.clear();
-    try {
-      await super.clear();
-    } catch {
-    }
-  }
-  async toCsvData() {
-    const rows = [];
-    rows.push(this.headers);
-    this.localItems.forEach((item) => {
-      try {
-        rows.push(this.itemToRow(item));
-      } catch (err) {
-        console.error(err);
-      }
-    });
-    return rows;
-  }
-}
-const memberListStore = new WhatsAppStorage({
-  name: "whatsapp-scraper"
-});
-const counterId = "scraper-number-tracker";
-const exportName = "whatsAppExport";
-let logsTracker;
-async function updateConter() {
-  const tracker = document.getElementById(counterId);
-  if (tracker) {
-    tracker.textContent = memberListStore.localItems.size.toString();
-  }
-}
-const uiWidget = new UIContainer();
-function buildCTABtns() {
-  logsTracker = new HistoryTracker({
-    onDelete: async (groupId) => {
-      console.log(`Delete ${groupId}`);
-      await memberListStore.deleteFromGroupId(groupId);
-      await updateConter();
-    },
-    divContainer: uiWidget.history,
-    maxLogs: 4
-  });
-  const btnDownload = createCta();
-  btnDownload.appendChild(createTextSpan("Download "));
-  btnDownload.appendChild(createTextSpan("0", {
-    bold: true,
-    idAttribute: counterId
-  }));
-  btnDownload.appendChild(createTextSpan(" users"));
-  btnDownload.addEventListener("click", async function() {
+    const participants = collectParticipants(group.id, chats, participantsStore, metas);
+    const members = joinMembers(participants, contacts, group.name);
     const timestamp = (/* @__PURE__ */ new Date()).toISOString();
-    const data = await memberListStore.toCsvData();
+    exportToCsvWithBom(`${EXPORT_PREFIX}-${timestamp}.csv`, membersToCsv(members));
+    return { group, count: members.length };
+  } finally {
     try {
-      exportToCsvWithBom(`${exportName}-${timestamp}.csv`, data);
-    } catch (err) {
-      console.error("Error while generating export");
-      console.log(err.stack);
+      db.close();
+    } catch {
     }
+  }
+}
+function setDirLtr(widget) {
+  widget.inner.setAttribute("dir", "ltr");
+  widget.canva.setAttribute("dir", "ltr");
+}
+function buildWidget() {
+  const uiWidget = new UIContainer();
+  const statusEl = document.createElement("div");
+  statusEl.setAttribute("style", [
+    "text-align: left;",
+    "background: #f5f5fa;",
+    "padding: 8px 10px;",
+    "margin-bottom: 8px;",
+    "border-radius: 8px;",
+    "font-family: monospace;",
+    "font-size: 14px;",
+    "line-height: 1.35;",
+    "max-width: 420px;",
+    "white-space: normal;",
+    "color: #2f2f2f;",
+    "box-shadow: rgba(42, 35, 66, 0.2) 0 2px 2px, rgba(45, 35, 66, 0.2) 0 7px 13px -4px;"
+  ].join(""));
+  statusEl.textContent = DEFAULT_STATUS;
+  uiWidget.history.appendChild(statusEl);
+  const setStatus = (text) => {
+    statusEl.textContent = text;
+  };
+  const formatFound = (group, count) => {
+    const base = `Found ${count} members in ${group.name}`;
+    return group.usedFallback ? `${base} (${group.fallbackReason})` : base;
+  };
+  let exporting = false;
+  const runExport = async () => {
+    if (exporting)
+      return;
+    exporting = true;
+    setStatus("Reading IndexedDB…");
+    try {
+      const { group, count } = await exportGroupMembers();
+      setStatus(formatFound(group, count));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setStatus(message || "Export failed");
+      console.error(err);
+    } finally {
+      exporting = false;
+    }
+  };
+  const btnExport = createCta();
+  btnExport.appendChild(createTextSpan("Export"));
+  btnExport.addEventListener("click", () => {
+    void runExport();
   });
-  uiWidget.addCta(btnDownload);
+  uiWidget.addCta(btnExport);
   uiWidget.addCta(createSpacer());
-  const btnReinit = createCta();
-  btnReinit.appendChild(createTextSpan("Reset"));
-  btnReinit.addEventListener("click", async function() {
-    await memberListStore.clear();
-    logsTracker.cleanLogs();
-    await updateConter();
+  const btnReset = createCta();
+  btnReset.appendChild(createTextSpan("Reset"));
+  btnReset.addEventListener("click", () => {
+    setStatus(DEFAULT_STATUS);
   });
-  uiWidget.addCta(btnReinit);
+  uiWidget.addCta(btnReset);
   uiWidget.makeItDraggable();
   uiWidget.render();
-  const widgetAny = uiWidget;
-  if (widgetAny.inner && widgetAny.inner.setAttribute) {
-    widgetAny.inner.setAttribute("dir", "ltr");
-  }
-  if (widgetAny.canva && widgetAny.canva.setAttribute) {
-    widgetAny.canva.setAttribute("dir", "ltr");
-  }
-  window.setTimeout(() => {
-    updateConter();
-  }, 1e3);
+  setDirLtr(uiWidget);
+  void runExport();
 }
-let modalObserver;
-let modalRescanTimer;
-let modalScrollTimer;
-function findScrollableContainer(modal) {
-  const listItem = modal.querySelector('[role="listitem"]');
-  if (listItem) {
-    let el = listItem.parentElement;
-    while (el && (modal.contains(el) || el === modal)) {
-      if (el.scrollHeight > el.clientHeight + 4) {
-        return el;
-      }
-      el = el.parentElement;
-    }
-  }
-  let best = null;
-  let bestOverflow = 0;
-  const candidates = [modal, ...Array.from(modal.querySelectorAll("*"))];
-  for (const el of candidates) {
-    const extra = el.scrollHeight - el.clientHeight;
-    if (extra <= bestOverflow)
-      continue;
-    const style = window.getComputedStyle(el);
-    const oy = style.overflowY;
-    if (oy === "auto" || oy === "scroll" || oy === "overlay" || oy === "hidden") {
-      best = el;
-      bestOverflow = extra;
-    }
-  }
-  return best;
-}
-function stopAutoScroll(completed = false) {
-  if (modalScrollTimer != null) {
-    window.clearInterval(modalScrollTimer);
-    modalScrollTimer = void 0;
-    if (completed && logsTracker) {
-      logsTracker.addHistoryLog({
-        label: "Scroll complete",
-        category: LogCategory.LOG
-      });
-    }
-  }
-}
-function startAutoScroll(modalElem) {
-  stopAutoScroll(false);
-  let attempts = 0;
-  const tryStart = () => {
-    if (!modalElem.isConnected)
-      return;
-    const scroller = findScrollableContainer(modalElem);
-    if (!scroller) {
-      attempts += 1;
-      if (attempts < 15) {
-        window.setTimeout(tryStart, 400);
-      }
-      return;
-    }
-    logsTracker.addHistoryLog({
-      label: "Auto-scroll…",
-      category: LogCategory.LOG
-    });
-    const stepPx = 120;
-    const tickMs = 400;
-    const maxRoundTrips = 24;
-    const stagnantRoundTripsToStop = 3;
-    let direction = 1;
-    let lastCount = -1;
-    let stagnantRoundTrips = 0;
-    let completedRoundTrips = 0;
-    let passedBottom = false;
-    let settling = false;
-    void memberListStore.getCount().then((c) => {
-      lastCount = c;
-    });
-    modalScrollTimer = window.setInterval(() => {
-      if (!modalElem.isConnected || !scroller.isConnected) {
-        stopAutoScroll(false);
-        return;
-      }
-      const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-      if (maxScroll < 8) {
-        return;
-      }
-      scroller.scrollTop += direction * stepPx;
-      const atBottom = scroller.scrollTop >= maxScroll - 2;
-      const atTop = scroller.scrollTop <= 2;
-      if (direction === 1 && atBottom) {
-        direction = -1;
-        passedBottom = true;
-      } else if (direction === -1 && atTop && passedBottom) {
-        direction = 1;
-        passedBottom = false;
-        if (settling)
-          return;
-        settling = true;
-        void (async () => {
-          try {
-            const count = await memberListStore.getCount();
-            completedRoundTrips += 1;
-            if (count === lastCount) {
-              stagnantRoundTrips += 1;
-            } else {
-              lastCount = count;
-              stagnantRoundTrips = 0;
-            }
-            if (stagnantRoundTrips >= stagnantRoundTripsToStop || completedRoundTrips >= maxRoundTrips) {
-              stopAutoScroll(true);
-            }
-          } finally {
-            settling = false;
-          }
-        })();
-      }
-    }, tickMs);
-  };
-  window.setTimeout(tryStart, 300);
-}
-function listenModalChanges() {
-  if (modalObserver || modalRescanTimer != null || modalScrollTimer != null) {
-    stopListeningModalChanges();
-  }
-  const source = getGroupSourceName();
-  const modalElem = findModalElem();
-  if (!modalElem)
-    return;
-  const scrapedIds = /* @__PURE__ */ new Set();
-  const extractFromListItem = async (listItem) => {
-    const titleInfo = getListItemTitle(listItem);
-    if (!titleInfo)
-      return;
-    const titleText = titleInfo.text;
-    if (!titleText)
-      return;
-    let profileName = "";
-    let profilePhone = "";
-    if (titleText.startsWith("~")) {
-      profileName = cleanName(titleText);
-    } else if (isPhoneNumber(titleText)) {
-      profilePhone = titleText;
-    } else if (looksLikeName(titleText)) {
-      profileName = cleanName(titleText);
-    }
-    const candidates = collectCandidates(listItem);
-    for (const candidate of candidates) {
-      if (isPhoneNumber(candidate)) {
-        if (!profilePhone)
-          profilePhone = candidate;
-        continue;
-      }
-      if (candidate.startsWith("~")) {
-        if (!profileName)
-          profileName = cleanName(candidate);
-        continue;
-      }
-      if (!profileName && looksLikeName(candidate) && candidate !== titleText) {
-        const maybeDesc = cleanDescription(candidate);
-        if (isPhoneNumber(titleText) && maybeDesc) {
-          profileName = cleanName(candidate);
-        }
-      }
-    }
-    if (profilePhone && !isPhoneNumber(profilePhone)) {
-      if (!profileName && looksLikeName(profilePhone)) {
-        profileName = cleanName(profilePhone);
-      }
-      profilePhone = "";
-    }
-    if (!profilePhone) {
-      const hidden = findHiddenPhone(listItem, profileName);
-      if (hidden && isPhoneNumber(hidden)) {
-        profilePhone = hidden;
-      }
-    }
-    if (!profileName && !profilePhone)
-      return;
-    let identifier = profilePhone || profileName;
-    const alreadyByPhone = !!(profilePhone && scrapedIds.has(profilePhone));
-    const alreadyByName = !!(profileName && scrapedIds.has(profileName));
-    if (alreadyByPhone)
-      return;
-    if (alreadyByName && !profilePhone)
-      return;
-    if (profilePhone && profileName) {
-      if (alreadyByName) {
-        identifier = profileName;
-      } else {
-        const existingByName = await memberListStore.getElem(profileName);
-        if (existingByName && !existingByName.phoneNumber) {
-          identifier = profileName;
-        }
-      }
-    }
-    scrapedIds.add(identifier);
-    if (profilePhone)
-      scrapedIds.add(profilePhone);
-    if (profileName)
-      scrapedIds.add(profileName);
-    const profileDescription = findSecondaryDescription(
-      listItem,
-      titleInfo.el,
-      profileName,
-      profilePhone
-    );
-    const data = {
-      profileId: identifier
-    };
-    if (profilePhone)
-      data.phoneNumber = profilePhone;
-    if (source)
-      data.source = source;
-    if (profileName)
-      data.name = profileName;
-    if (profileDescription)
-      data.description = profileDescription;
-    await memberListStore.addElem(identifier, data, true);
-    logsTracker.addHistoryLog({
-      label: `Scraping ${profileName || profilePhone}`,
-      category: LogCategory.LOG
-    });
-    updateConter();
-  };
-  const handleNode = (el) => {
-    let items = [];
-    if (el.getAttribute && el.getAttribute("role") === "listitem") {
-      items = [el];
-    } else if (el.querySelectorAll) {
-      items = Array.from(el.querySelectorAll('[role="listitem"]'));
-    }
-    items.forEach((listItem) => {
-      const titleInfo = getListItemTitle(listItem);
-      const titleText = titleInfo ? titleInfo.text : "";
-      if (!titleText)
-        return;
-      if (listItem.getAttribute("data-scraped") === titleText)
-        return;
-      listItem.setAttribute("data-scraped", titleText);
-      window.setTimeout(() => extractFromListItem(listItem), 10);
-    });
-  };
-  const callback = (mutationList) => {
-    let rescanModal = false;
-    for (const mutation of mutationList) {
-      if (mutation.type === "childList" && mutation.addedNodes.length > 0) {
-        mutation.addedNodes.forEach((node) => {
-          if (node.nodeType === 1)
-            handleNode(node);
-        });
-      } else if (mutation.type === "attributes" && mutation.attributeName === "data-scraped") {
-        continue;
-      } else if (mutation.type === "attributes" || mutation.type === "characterData") {
-        rescanModal = true;
-      }
-    }
-    if (rescanModal) {
-      handleNode(modalElem);
-    }
-  };
-  handleNode(modalElem);
-  modalObserver = new MutationObserver(callback);
-  modalObserver.observe(modalElem, {
-    childList: true,
-    attributes: true,
-    characterData: true,
-    subtree: true
-  });
-  modalRescanTimer = window.setInterval(() => {
-    if (!modalElem.isConnected) {
-      stopListeningModalChanges();
-      return;
-    }
-    handleNode(modalElem);
-  }, 500);
-  startAutoScroll(modalElem);
-}
-function stopListeningModalChanges() {
-  if (modalObserver) {
-    modalObserver.disconnect();
-    modalObserver = void 0;
-  }
-  if (modalRescanTimer != null) {
-    window.clearInterval(modalRescanTimer);
-    modalRescanTimer = void 0;
-  }
-  stopAutoScroll(false);
-}
-function main() {
-  buildCTABtns();
-  logsTracker.addHistoryLog({
-    label: "Wait for modal",
-    category: LogCategory.LOG
-  });
-  function bodyCallback(mutationList) {
-    for (const mutation of mutationList) {
-      if (mutation.type === "childList") {
-        if (mutation.addedNodes.length > 0) {
-          mutation.addedNodes.forEach((node) => {
-            if (node.nodeType !== 1)
-              return;
-            const htmlNode = node;
-            if (nodeIsOrContainsModal(htmlNode)) {
-              window.setTimeout(() => {
-                listenModalChanges();
-                logsTracker.addHistoryLog({
-                  label: "Modal found - Scroll to scrape",
-                  category: LogCategory.LOG
-                });
-              }, 10);
-            }
-          });
-        }
-        if (mutation.removedNodes.length > 0) {
-          mutation.removedNodes.forEach((node) => {
-            if (node.nodeType !== 1)
-              return;
-            const htmlNode = node;
-            if (nodeIsOrContainsModal(htmlNode)) {
-              stopListeningModalChanges();
-              logsTracker.addHistoryLog({
-                label: "Modal Removed - Scraping Stopped",
-                category: LogCategory.LOG
-              });
-            }
-          });
-        }
-      }
-    }
-  }
-  const bodyConfig = { attributes: true, childList: true, subtree: true };
-  const bodyObserver = new MutationObserver(bodyCallback);
-  const app = document.getElementById("app");
-  if (app) {
-    bodyObserver.observe(app, bodyConfig);
-  }
-}
-main();
+buildWidget();
