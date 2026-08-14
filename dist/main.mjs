@@ -1320,7 +1320,125 @@ function buildCTABtns() {
   }, 1e3);
 }
 let modalObserver;
+let modalRescanTimer;
+let modalScrollTimer;
+function findScrollableContainer(modal) {
+  const listItem = modal.querySelector('[role="listitem"]');
+  if (listItem) {
+    let el = listItem.parentElement;
+    while (el && (modal.contains(el) || el === modal)) {
+      if (el.scrollHeight > el.clientHeight + 4) {
+        return el;
+      }
+      el = el.parentElement;
+    }
+  }
+  let best = null;
+  let bestOverflow = 0;
+  const candidates = [modal, ...Array.from(modal.querySelectorAll("*"))];
+  for (const el of candidates) {
+    const extra = el.scrollHeight - el.clientHeight;
+    if (extra <= bestOverflow)
+      continue;
+    const style = window.getComputedStyle(el);
+    const oy = style.overflowY;
+    if (oy === "auto" || oy === "scroll" || oy === "overlay" || oy === "hidden") {
+      best = el;
+      bestOverflow = extra;
+    }
+  }
+  return best;
+}
+function stopAutoScroll(completed = false) {
+  if (modalScrollTimer != null) {
+    window.clearInterval(modalScrollTimer);
+    modalScrollTimer = void 0;
+    if (completed && logsTracker) {
+      logsTracker.addHistoryLog({
+        label: "Scroll complete",
+        category: LogCategory.LOG
+      });
+    }
+  }
+}
+function startAutoScroll(modalElem) {
+  stopAutoScroll(false);
+  let attempts = 0;
+  const tryStart = () => {
+    if (!modalElem.isConnected)
+      return;
+    const scroller = findScrollableContainer(modalElem);
+    if (!scroller) {
+      attempts += 1;
+      if (attempts < 15) {
+        window.setTimeout(tryStart, 400);
+      }
+      return;
+    }
+    logsTracker.addHistoryLog({
+      label: "Auto-scroll…",
+      category: LogCategory.LOG
+    });
+    const stepPx = 120;
+    const tickMs = 400;
+    const maxRoundTrips = 24;
+    const stagnantRoundTripsToStop = 3;
+    let direction = 1;
+    let lastCount = -1;
+    let stagnantRoundTrips = 0;
+    let completedRoundTrips = 0;
+    let passedBottom = false;
+    let settling = false;
+    void memberListStore.getCount().then((c) => {
+      lastCount = c;
+    });
+    modalScrollTimer = window.setInterval(() => {
+      if (!modalElem.isConnected || !scroller.isConnected) {
+        stopAutoScroll(false);
+        return;
+      }
+      const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      if (maxScroll < 8) {
+        return;
+      }
+      scroller.scrollTop += direction * stepPx;
+      const atBottom = scroller.scrollTop >= maxScroll - 2;
+      const atTop = scroller.scrollTop <= 2;
+      if (direction === 1 && atBottom) {
+        direction = -1;
+        passedBottom = true;
+      } else if (direction === -1 && atTop && passedBottom) {
+        direction = 1;
+        passedBottom = false;
+        if (settling)
+          return;
+        settling = true;
+        void (async () => {
+          try {
+            const count = await memberListStore.getCount();
+            completedRoundTrips += 1;
+            if (count === lastCount) {
+              stagnantRoundTrips += 1;
+            } else {
+              lastCount = count;
+              stagnantRoundTrips = 0;
+            }
+            if (stagnantRoundTrips >= stagnantRoundTripsToStop || completedRoundTrips >= maxRoundTrips) {
+              stopAutoScroll(true);
+            }
+          } finally {
+            settling = false;
+          }
+        })();
+      }
+    }, tickMs);
+  };
+  window.setTimeout(tryStart, 300);
+}
 function listenModalChanges() {
+  if (modalObserver || modalRescanTimer != null || modalScrollTimer != null) {
+    stopListeningModalChanges();
+  }
   const source = getGroupSourceName();
   const modalElem = findModalElem();
   if (!modalElem)
@@ -1440,23 +1558,50 @@ function listenModalChanges() {
     });
   };
   const callback = (mutationList) => {
+    let rescanModal = false;
     for (const mutation of mutationList) {
       if (mutation.type === "childList" && mutation.addedNodes.length > 0) {
         mutation.addedNodes.forEach((node) => {
           if (node.nodeType === 1)
             handleNode(node);
         });
+      } else if (mutation.type === "attributes" && mutation.attributeName === "data-scraped") {
+        continue;
+      } else if (mutation.type === "attributes" || mutation.type === "characterData") {
+        rescanModal = true;
       }
+    }
+    if (rescanModal) {
+      handleNode(modalElem);
     }
   };
   handleNode(modalElem);
   modalObserver = new MutationObserver(callback);
-  modalObserver.observe(modalElem, { childList: true, subtree: true });
+  modalObserver.observe(modalElem, {
+    childList: true,
+    attributes: true,
+    characterData: true,
+    subtree: true
+  });
+  modalRescanTimer = window.setInterval(() => {
+    if (!modalElem.isConnected) {
+      stopListeningModalChanges();
+      return;
+    }
+    handleNode(modalElem);
+  }, 500);
+  startAutoScroll(modalElem);
 }
 function stopListeningModalChanges() {
   if (modalObserver) {
     modalObserver.disconnect();
+    modalObserver = void 0;
   }
+  if (modalRescanTimer != null) {
+    window.clearInterval(modalRescanTimer);
+    modalRescanTimer = void 0;
+  }
+  stopAutoScroll(false);
 }
 function main() {
   buildCTABtns();

@@ -610,9 +610,143 @@ function buildCTABtns(){
     }, 1000)
 }
 
-let modalObserver: MutationObserver;
+let modalObserver: MutationObserver | undefined;
+let modalRescanTimer: number | undefined;
+let modalScrollTimer: number | undefined;
+
+function findScrollableContainer(modal: HTMLElement): HTMLElement | null {
+    const listItem = modal.querySelector<HTMLElement>('[role="listitem"]');
+    if (listItem) {
+        let el: HTMLElement | null = listItem.parentElement;
+        while (el && (modal.contains(el) || el === modal)) {
+            if (el.scrollHeight > el.clientHeight + 4) {
+                return el;
+            }
+            el = el.parentElement;
+        }
+    }
+
+    let best: HTMLElement | null = null;
+    let bestOverflow = 0;
+    const candidates = [modal, ...Array.from(modal.querySelectorAll<HTMLElement>('*'))];
+    for (const el of candidates) {
+        const extra = el.scrollHeight - el.clientHeight;
+        if (extra <= bestOverflow) continue;
+        const style = window.getComputedStyle(el);
+        const oy = style.overflowY;
+        if (oy === 'auto' || oy === 'scroll' || oy === 'overlay' || oy === 'hidden') {
+            best = el;
+            bestOverflow = extra;
+        }
+    }
+    return best;
+}
+
+function stopAutoScroll(completed: boolean = false){
+    if (modalScrollTimer != null) {
+        window.clearInterval(modalScrollTimer);
+        modalScrollTimer = undefined;
+        if (completed && logsTracker) {
+            logsTracker.addHistoryLog({
+                label: "Scroll complete",
+                category: LogCategory.LOG
+            });
+        }
+    }
+}
+
+function startAutoScroll(modalElem: HTMLElement){
+    stopAutoScroll(false);
+
+    let attempts = 0;
+    const tryStart = () => {
+        if (!modalElem.isConnected) return;
+        const scroller = findScrollableContainer(modalElem);
+        if (!scroller) {
+            attempts += 1;
+            if (attempts < 15) {
+                window.setTimeout(tryStart, 400);
+            }
+            return;
+        }
+
+        logsTracker.addHistoryLog({
+            label: "Auto-scroll…",
+            category: LogCategory.LOG
+        });
+
+        const stepPx = 120;
+        const tickMs = 400;
+        const maxRoundTrips = 24;
+        const stagnantRoundTripsToStop = 3;
+        let direction = 1;
+        let lastCount = -1;
+        let stagnantRoundTrips = 0;
+        let completedRoundTrips = 0;
+        let passedBottom = false;
+        let settling = false;
+
+        void memberListStore.getCount().then((c) => {
+            lastCount = c;
+        });
+
+        modalScrollTimer = window.setInterval(() => {
+            if (!modalElem.isConnected || !scroller.isConnected) {
+                stopAutoScroll(false);
+                return;
+            }
+
+            const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+            if (maxScroll < 8) {
+                return;
+            }
+
+            scroller.scrollTop += direction * stepPx;
+
+            const atBottom = scroller.scrollTop >= maxScroll - 2;
+            const atTop = scroller.scrollTop <= 2;
+
+            if (direction === 1 && atBottom) {
+                direction = -1;
+                passedBottom = true;
+            } else if (direction === -1 && atTop && passedBottom) {
+                direction = 1;
+                passedBottom = false;
+                if (settling) return;
+                settling = true;
+                void (async () => {
+                    try {
+                        const count = await memberListStore.getCount();
+                        completedRoundTrips += 1;
+                        if (count === lastCount) {
+                            stagnantRoundTrips += 1;
+                        } else {
+                            lastCount = count;
+                            stagnantRoundTrips = 0;
+                        }
+                        if (
+                            stagnantRoundTrips >= stagnantRoundTripsToStop ||
+                            completedRoundTrips >= maxRoundTrips
+                        ) {
+                            stopAutoScroll(true);
+                        }
+                    } finally {
+                        settling = false;
+                    }
+                })();
+            }
+        }, tickMs);
+    };
+
+    window.setTimeout(tryStart, 300);
+}
 
 function listenModalChanges(){
+    // Restart cleanly if the body observer re-fires while a modal is already open
+    if (modalObserver || modalRescanTimer != null || modalScrollTimer != null) {
+        stopListeningModalChanges();
+    }
+
     const source = getGroupSourceName();
 
     const modalElem = findModalElem();
@@ -746,12 +880,22 @@ function listenModalChanges(){
     };
 
     const callback = (mutationList: MutationRecord[]) => {
+        let rescanModal = false;
         for (const mutation of mutationList) {
             if (mutation.type === "childList" && mutation.addedNodes.length > 0) {
                 mutation.addedNodes.forEach(node => {
                     if (node.nodeType === 1) handleNode(node as HTMLElement);
                 });
+            } else if (mutation.type === "attributes" && mutation.attributeName === "data-scraped") {
+                continue;
+            } else if (mutation.type === "attributes" || mutation.type === "characterData") {
+                // Recycled virtualized rows often keep the same node and only
+                // change title/text — re-scan every current listitem.
+                rescanModal = true;
             }
+        }
+        if (rescanModal) {
+            handleNode(modalElem as HTMLElement);
         }
     };
 
@@ -759,16 +903,37 @@ function listenModalChanges(){
     handleNode(modalElem as HTMLElement);
 
     modalObserver = new MutationObserver(callback);
-    modalObserver.observe(modalElem, { childList: true, subtree: true });
+    modalObserver.observe(modalElem, {
+        childList: true,
+        attributes: true,
+        characterData: true,
+        subtree: true
+    });
+
+    // Safety net: virtualization can update titles without a childList add
+    modalRescanTimer = window.setInterval(() => {
+        if (!modalElem.isConnected) {
+            stopListeningModalChanges();
+            return;
+        }
+        handleNode(modalElem as HTMLElement);
+    }, 500);
+
+    startAutoScroll(modalElem as HTMLElement);
 }
 
 
 
 function stopListeningModalChanges(){
-    // Later, you can stop observing
     if(modalObserver){
         modalObserver.disconnect();
+        modalObserver = undefined;
     }
+    if (modalRescanTimer != null) {
+        window.clearInterval(modalRescanTimer);
+        modalRescanTimer = undefined;
+    }
+    stopAutoScroll(false);
 }
 
 
