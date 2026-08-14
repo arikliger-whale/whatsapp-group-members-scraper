@@ -1169,7 +1169,12 @@ function rowStyle(selected) {
     "color: #2f2f2f;"
   ].join("");
 }
+let dismissWidget = null;
 function buildWidget() {
+  if (dismissWidget) {
+    dismissWidget();
+    dismissWidget = null;
+  }
   const uiWidget = new UIContainer();
   const statusEl = document.createElement("div");
   statusEl.setAttribute("style", [
@@ -1267,6 +1272,24 @@ function buildWidget() {
       exporting = false;
     }
   };
+  const destroyWidget = () => {
+    document.removeEventListener("keydown", onEscapeKey);
+    uiWidget.inner.remove();
+    if (uiWidget.canva) {
+      uiWidget.canva.remove();
+    }
+    document.querySelectorAll("[data-wa-scraper-widget]").forEach((node) => {
+      node.remove();
+    });
+    if (dismissWidget === destroyWidget) {
+      dismissWidget = null;
+    }
+  };
+  const onEscapeKey = (event) => {
+    if (event.key === "Escape") {
+      destroyWidget();
+    }
+  };
   const btnExport = createCta();
   btnExport.appendChild(createTextSpan("Export"));
   btnExport.addEventListener("click", () => {
@@ -1282,9 +1305,22 @@ function buildWidget() {
     setStatus(DEFAULT_STATUS);
   });
   uiWidget.addCta(btnReset);
+  uiWidget.addCta(createSpacer());
+  const btnClose = createCta();
+  btnClose.appendChild(createTextSpan("Close"));
+  btnClose.addEventListener("click", () => {
+    destroyWidget();
+  });
+  uiWidget.addCta(btnClose);
   uiWidget.inner.setAttribute("dir", "ltr");
   uiWidget.inner.setAttribute("style", overlayChromeStyle());
+  uiWidget.inner.setAttribute("data-wa-scraper-widget", "");
+  if (uiWidget.canva) {
+    uiWidget.canva.setAttribute("data-wa-scraper-widget", "");
+  }
   document.body.appendChild(uiWidget.inner);
+  document.addEventListener("keydown", onEscapeKey);
+  dismissWidget = destroyWidget;
   const loadList = async () => {
     setStatus("Reading IndexedDB…");
     try {

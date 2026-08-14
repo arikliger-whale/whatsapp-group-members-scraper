@@ -816,7 +816,14 @@ function rowStyle(selected: boolean): string {
     ].join('');
 }
 
+let dismissWidget: (() => void) | null = null;
+
 function buildWidget(): void {
+    if (dismissWidget) {
+        dismissWidget();
+        dismissWidget = null;
+    }
+
     const uiWidget = new UIContainer();
     const statusEl = document.createElement('div');
     statusEl.setAttribute('style', [
@@ -924,6 +931,26 @@ function buildWidget(): void {
         }
     };
 
+    const destroyWidget = () => {
+        document.removeEventListener('keydown', onEscapeKey);
+        uiWidget.inner.remove();
+        if (uiWidget.canva) {
+            uiWidget.canva.remove();
+        }
+        document.querySelectorAll('[data-wa-scraper-widget]').forEach((node) => {
+            node.remove();
+        });
+        if (dismissWidget === destroyWidget) {
+            dismissWidget = null;
+        }
+    };
+
+    const onEscapeKey = (event: KeyboardEvent) => {
+        if (event.key === 'Escape') {
+            destroyWidget();
+        }
+    };
+
     const btnExport = createCta();
     btnExport.appendChild(createTextSpan('Export'));
     btnExport.addEventListener('click', () => {
@@ -942,12 +969,27 @@ function buildWidget(): void {
     });
     uiWidget.addCta(btnReset);
 
+    uiWidget.addCta(createSpacer());
+
+    const btnClose = createCta();
+    btnClose.appendChild(createTextSpan('Close'));
+    btnClose.addEventListener('click', () => {
+        destroyWidget();
+    });
+    uiWidget.addCta(btnClose);
+
     // Do not call makeItDraggable() — it preventDefault()s mousedown on the whole panel
     // and blocks <input>/<button> clicks. Mount a small custom overlay instead of the
     // full-screen pointer-events canvas.
     uiWidget.inner.setAttribute('dir', 'ltr');
     uiWidget.inner.setAttribute('style', overlayChromeStyle());
+    uiWidget.inner.setAttribute('data-wa-scraper-widget', '');
+    if (uiWidget.canva) {
+        uiWidget.canva.setAttribute('data-wa-scraper-widget', '');
+    }
     document.body.appendChild(uiWidget.inner);
+    document.addEventListener('keydown', onEscapeKey);
+    dismissWidget = destroyWidget;
 
     const loadList = async () => {
         setStatus('Reading IndexedDB…');
